@@ -1,0 +1,87 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-albion-purple: #49266f;
+  --color-albion-purple-light: #5f338d;
+  --color-albion-purple-dark: #351b52;
+  --color-albion-gold: #f2c057;
+  --color-albion-gold-light: #f5cd79;
+  --color-albion-gold-dark: #dbab3d;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #fdfdfd;
+  background-image: 
+    radial-gradient(at 0% 0%, rgba(73, 38, 111, 0.12) 0px, transparent 50%), 
+    radial-gradient(at 100% 100%, rgba(242, 192, 87, 0.12) 0px, transparent 50%);
+  background-attachment: fixed;
+  color: #1a1a1a;
+  min-height: 100vh;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+}
+
+/* Glassmorphism Panel styles */
+.glass-card {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 
+    0 10px 30px -10px rgba(0, 0, 0, 0.04),
+    0 1px 1px 0 rgba(255, 255, 255, 0.5) inset;
+}
+
+.glass-card-deep {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 
+    0 20px 40px -15px rgba(73, 38, 111, 0.06),
+    0 1px 1px 0 rgba(255, 255, 255, 0.6) inset;
+}
+
+.glass-card-dark {
+  background: rgba(73, 38, 111, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 
+    0 20px 45px -10px rgba(0, 0, 0, 0.15),
+    0 1px 1px 0 rgba(255, 255, 255, 0.2) inset;
+}
+
+/* Custom modern scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(247, 245, 250, 0.4);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(218, 207, 227, 0.6);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(191, 174, 203, 0.8);
+}
+
+/* Shimmer animation */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, #f3f0f7 25%, #e8e3f0 50%, #f3f0f7 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}

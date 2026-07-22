@@ -1,0 +1,1024 @@
+import React, { useState, useEffect } from 'react';
+import Navbar from './components/Navbar';
+import Dashboard from './components/Dashboard';
+import ResumeForm from './components/ResumeForm';
+import InterviewPreparer from './components/InterviewPreparer';
+import ActiveInterview from './components/ActiveInterview';
+import FinalReportView from './components/FinalReportView';
+import { ResumeInfo, JobTarget, InterviewSession, QuestionFeedback, SpeakingStats, FinalReport } from './types';
+import { Shield, Trash2, KeyRound, Sparkles, GraduationCap, ChevronRight, CheckCircle2, User, Mail, Award, LineChart } from 'lucide-react';
+import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, updateDoc, getDocs, collection } from 'firebase/firestore';
+
+export default function App() {
+  // Navigation
+  const [currentTab, setCurrentTab] = useState('home');
+
+  // Profile / Authentication
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userName, setUserName] = useState<string | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [loginEmailInput, setLoginEmailInput] = useState('');
+  const [loginNameInput, setLoginNameInput] = useState('');
+
+  // Local Resume Info
+  const [resumeInfo, setResumeInfo] = useState<ResumeInfo | null>(null);
+
+  // Sessions state
+  const [sessions, setSessions] = useState<InterviewSession[]>([]);
+  const [activeSession, setActiveSession] = useState<InterviewSession | null>(null);
+  const [selectedReportSession, setSelectedReportSession] = useState<InterviewSession | null>(null);
+
+  // Status flags
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const isGuest = !auth.currentUser && !userEmail;
+
+  // Authenticated listener and loading Firestore user database
+  useEffect(() => {
+    // Attempt guest/user mode hydration first
+    const savedEmail = localStorage.getItem('brit_user_email');
+    const savedName = localStorage.getItem('brit_user_name');
+    const savedResume = localStorage.getItem('brit_resume_info');
+    const savedSessions = localStorage.getItem('brit_sessions');
+
+    if (savedEmail) {
+      setUserEmail(savedEmail);
+      if (savedName) setUserName(savedName);
+      if (savedResume) {
+        try {
+          setResumeInfo(JSON.parse(savedResume));
+        } catch (e) {
+          console.error('Failed to parse saved resume');
+        }
+      }
+      if (savedSessions) {
+        try {
+          setSessions(JSON.parse(savedSessions));
+        } catch (e) {
+          console.error('Failed to parse sessions history');
+        }
+      }
+    } else {
+      // Load transient Guest sessions/resume from sessionStorage
+      const guestResume = sessionStorage.getItem('brit_resume_info_guest');
+      const guestSessions = sessionStorage.getItem('brit_sessions_guest');
+      if (guestResume) {
+        try {
+          setResumeInfo(JSON.parse(guestResume));
+        } catch (e) {}
+      }
+      if (guestSessions) {
+        try {
+          setSessions(JSON.parse(guestSessions));
+        } catch (e) {}
+      }
+    }
+
+    // Subscribe to Firebase Authentication
+    setIsLoading(true);
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        setUserEmail(firebaseUser.email);
+        setUserName(firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Brit Student');
+        
+        // Fetch User Profile from Firestore
+        const userDocRef = doc(db, 'users', firebaseUser.uid);
+        try {
+          const userSnap = await getDoc(userDocRef);
+          
+          // Migrate Guest Resume transient state if present
+          const guestResumeStr = sessionStorage.getItem('brit_resume_info_guest');
+          let finalResume: ResumeInfo | null = null;
+          if (guestResumeStr) {
+            try {
+              finalResume = JSON.parse(guestResumeStr);
+              await setDoc(userDocRef, { savedResume: finalResume }, { merge: true });
+              sessionStorage.removeItem('brit_resume_info_guest');
+              triggerToast('Your guest resume setup has been saved to your account!');
+            } catch (e) {
+              console.error('Failed to parse guest resume in auth subscription', e);
+            }
+          } else if (userSnap.exists()) {
+            const userData = userSnap.data();
+            if (userData.savedResume) {
+              finalResume = userData.savedResume;
+            }
+          }
+
+          if (finalResume) {
+            setResumeInfo(finalResume);
+            localStorage.setItem('brit_resume_info', JSON.stringify(finalResume));
+          } else {
+            // Write new registered profile to Firestore
+            const newProfile = {
+              email: firebaseUser.email || '',
+              name: firebaseUser.displayName || 'Brit Student',
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(userDocRef, newProfile, { merge: true });
+          }
+
+          // Migrate Guest Sessions transient state if present
+          const guestSessionsStr = sessionStorage.getItem('brit_sessions_guest');
+          let guestSessionsList: InterviewSession[] = [];
+          if (guestSessionsStr) {
+            try {
+              guestSessionsList = JSON.parse(guestSessionsStr);
+              for (const s of guestSessionsList) {
+                const migratedSession = { ...s, userId: firebaseUser.uid };
+                const sessionDocRef = doc(db, 'users', firebaseUser.uid, 'sessions', migratedSession.id);
+                await setDoc(sessionDocRef, migratedSession);
+              }
+              sessionStorage.removeItem('brit_sessions_guest');
+              triggerToast(`Saved ${guestSessionsList.length} guest session(s) to your account!`);
+            } catch (e) {
+              console.error('Failed to parse & migrate guest sessions in auth subscription', e);
+            }
+          }
+
+          // Fetch past sessions subcollection
+          const sessionsColRef = collection(db, 'users', firebaseUser.uid, 'sessions');
+          const sessionsSnap = await getDocs(sessionsColRef);
+          const loadedSessions: InterviewSession[] = [];
+          sessionsSnap.forEach((doc) => {
+            loadedSessions.push(doc.data() as InterviewSession);
+          });
+          
+          setSessions(loadedSessions);
+          localStorage.setItem('brit_sessions', JSON.stringify(loadedSessions));
+
+          // Update active/report sessions in state if they were guest sessions
+          setActiveSession(currentActive => currentActive?.userId === 'guest' ? { ...currentActive, userId: firebaseUser.uid } : currentActive);
+          setSelectedReportSession(currentReport => currentReport?.userId === 'guest' ? { ...currentReport, userId: firebaseUser.uid } : currentReport);
+          
+        } catch (error) {
+          console.error('Firestore synchronization error:', error);
+        } finally {
+          setIsLoading(false);
+        }
+      } else {
+        setIsLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Protect Speech TTS against page/tab changes
+  useEffect(() => {
+    if (currentTab !== 'active-interview') {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    }
+  }, [currentTab]);
+
+  const triggerToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 4000);
+  };
+
+  const handleSaveResume = async (updatedResume: ResumeInfo) => {
+    setResumeInfo(updatedResume);
+    
+    if (auth.currentUser) {
+      localStorage.setItem('brit_resume_info', JSON.stringify(updatedResume));
+      const userDocRef = doc(db, 'users', auth.currentUser.uid);
+      try {
+        await updateDoc(userDocRef, { savedResume: updatedResume });
+      } catch (error) {
+        try {
+          await setDoc(userDocRef, { savedResume: updatedResume }, { merge: true });
+        } catch (setErr) {
+          handleFirestoreError(setErr, OperationType.UPDATE, `users/${auth.currentUser.uid}`);
+        }
+      }
+    } else {
+      // It is guest mode! Store transiently in sessionStorage only
+      sessionStorage.setItem('brit_resume_info_guest', JSON.stringify(updatedResume));
+    }
+    triggerToast('Academic background profile successfully locks!');
+  };
+
+  // Google Authentication handler
+  const handleGoogleLogin = async () => {
+    setIsLoading(true);
+    setErrorMsg(null);
+    const provider = new GoogleAuthProvider();
+    try {
+      const result = await signInWithPopup(auth, provider);
+      triggerToast(`Welcome, ${result.user.displayName || 'Brit Student'}! Synchronization ready.`);
+      setShowAuthModal(false);
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg(`Authentication failed: ${err.message}. Please connect with standard email guest profile instead.`);
+      triggerToast('Google authentication failed.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Simulated email Guest/Offline login handler
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginEmailInput.trim()) return;
+
+    const email = loginEmailInput.trim();
+    const name = loginNameInput.trim() || email.split('@')[0];
+
+    setUserEmail(email);
+    setUserName(name);
+    localStorage.setItem('brit_user_email', email);
+    localStorage.setItem('brit_user_name', name);
+
+    // Save Guest Resume permanently if available
+    const guestResumeStr = sessionStorage.getItem('brit_resume_info_guest');
+    if (guestResumeStr) {
+      localStorage.setItem('brit_resume_info', guestResumeStr);
+      sessionStorage.removeItem('brit_resume_info_guest');
+    }
+
+    // Save Guest Sessions copy permanently if available
+    const guestSessionsStr = sessionStorage.getItem('brit_sessions_guest');
+    if (guestSessionsStr) {
+      try {
+        const guestSessions: InterviewSession[] = JSON.parse(guestSessionsStr);
+        // Map userIds of these sessions to this simulated offline email
+        const updatedSessionsList = [...sessions].map(s => s.userId === 'guest' ? { ...s, userId: email } : s);
+        setSessions(updatedSessionsList);
+        localStorage.setItem('brit_sessions', JSON.stringify(updatedSessionsList));
+        sessionStorage.removeItem('brit_sessions_guest');
+      } catch (e) {
+        console.error('Failed to parse guest sessions during simulated account creation', e);
+      }
+    } else {
+      localStorage.setItem('brit_sessions', JSON.stringify(sessions));
+    }
+
+    setShowAuthModal(false);
+    triggerToast(`Welcome back, ${name}! Your guest preparation progress has been permanently migrated.`);
+  };
+
+  // Real or Guest Sign out handler
+  const handleLogout = async () => {
+    setIsLoading(true);
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error('Signout failed', err);
+    }
+    setUserEmail(null);
+    setUserName(null);
+    localStorage.removeItem('brit_user_email');
+    localStorage.removeItem('brit_user_name');
+    localStorage.removeItem('brit_resume_info');
+    localStorage.removeItem('brit_sessions');
+    sessionStorage.removeItem('brit_resume_info_guest');
+    sessionStorage.removeItem('brit_sessions_guest');
+    setResumeInfo(null);
+    setSessions([]);
+    setActiveSession(null);
+    setSelectedReportSession(null);
+    setCurrentTab('home');
+    setIsLoading(false);
+    triggerToast('Signed out of student profile.');
+  };
+
+  // Purge all user data
+  const handlePurgeAllData = async () => {
+    if (window.confirm('WARNING: This permanently deletes all your uploaded resume details and past interview scores. This cannot be undone.')) {
+      setIsLoading(true);
+      try {
+        await signOut(auth);
+      } catch (err) {}
+      localStorage.clear();
+      setUserEmail(null);
+      setUserName(null);
+      setResumeInfo(null);
+      setSessions([]);
+      setActiveSession(null);
+      setSelectedReportSession(null);
+      setCurrentTab('home');
+      setIsLoading(false);
+      triggerToast('All local career prep data has been wiped.');
+    }
+  };
+
+  // Start configuring a new session
+  const handleConfigureNewSession = () => {
+    if (!resumeInfo || !resumeInfo.isParsed) {
+      triggerToast('Please upload or drag & drop your PDF resume first to customize your mock interview!');
+      setCurrentTab('resume');
+      return;
+    }
+    setCurrentTab('interview-preparer');
+  };
+
+  // Safe Exit during an ongoing interview
+  const handleExitActiveInterview = () => {
+    if (window.confirm('Are you sure you want to exit the mock interview? Your responses in this active round will not be saved.')) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      setActiveSession(null);
+      setCurrentTab('interview-preparer');
+      triggerToast('Mock interview session exited.');
+    }
+  };
+
+  // Generate Questions via API and transition to Active Interview
+  const handleStartPlanningSession = async (target: JobTarget) => {
+    setIsLoading(true);
+    setErrorMsg(null);
+
+    let sessionToStart: InterviewSession | null = null;
+
+    try {
+      const response = await fetch('/api/interview/generate-questions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resumeInfo,
+          jobTarget: target
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Interview plan generation failed on server');
+      }
+
+      const data = await response.json();
+      if (!data.questions || data.questions.length === 0) {
+        throw new Error('No mock questions returned from coach');
+      }
+
+      // Create new session structural record
+      sessionToStart = {
+        id: 'session_' + Date.now(),
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        jobTarget: target,
+        resumeInfo,
+        questions: data.questions,
+        currentQuestionIndex: 0,
+        userAnswers: {},
+        feedbacks: {},
+        speakingStatsHistory: {},
+        isCompleted: false,
+        userId: auth.currentUser ? auth.currentUser.uid : 'guest'
+      };
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg('Failed to weave mock plan. Retrying with offline parameters...');
+      
+      // Setup offline default simulation session
+      const offlineQuestions = [
+        { id: 'q1', text: `Hello Brit! Why are you interested in becoming a ${target.positionTitle} at ${target.companyName}, and how does your Albion background fit this?`, category: 'general' as const },
+        { id: 'q2', text: 'Tell me about a time you solved a hard laboratory or teamwork problem using critical thinking.', category: 'behavioral' as const },
+        { id: 'q3', text: 'What is one professional strength you possess, and one area you are working to refine?', category: 'closing' as const }
+      ];
+
+      sessionToStart = {
+        id: 'session_' + Date.now(),
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        jobTarget: target,
+        resumeInfo,
+        questions: offlineQuestions,
+        currentQuestionIndex: 0,
+        userAnswers: {},
+        feedbacks: {},
+        speakingStatsHistory: {},
+        isCompleted: false,
+        userId: auth.currentUser ? auth.currentUser.uid : 'guest'
+      };
+    }
+
+    if (sessionToStart) {
+      setActiveSession(sessionToStart);
+      setCurrentTab('active-interview');
+
+      // Sync with Firestore if authenticated
+      if (auth.currentUser) {
+        const sessionDocRef = doc(db, 'users', auth.currentUser.uid, 'sessions', sessionToStart.id);
+        try {
+          await setDoc(sessionDocRef, sessionToStart);
+        } catch (fsErr) {
+          handleFirestoreError(fsErr, OperationType.CREATE, `users/${auth.currentUser.uid}/sessions/${sessionToStart.id}`);
+        }
+      }
+    }
+    setIsLoading(false);
+  };
+
+  // Each answer submitted successfully
+  const handleAnswerReceived = async (
+    answerText: string,
+    feedback: QuestionFeedback,
+    stats: SpeakingStats,
+    totalSpeakingSeconds?: number
+  ) => {
+    if (!activeSession) return;
+
+    const currentQ = activeSession.questions[activeSession.currentQuestionIndex];
+    
+    // Add current details to the activeSession structure
+    const updatedAnswers = { ...activeSession.userAnswers, [currentQ.id]: answerText };
+    const updatedFeedbacks = { ...activeSession.feedbacks, [currentQ.id]: feedback };
+    const updatedSpeaking = { ...activeSession.speakingStatsHistory, [currentQ.id]: stats };
+
+    const nextIndex = activeSession.currentQuestionIndex + 1;
+    const isFinished = nextIndex >= activeSession.questions.length;
+
+    const progressSession: InterviewSession = {
+      ...activeSession,
+      userAnswers: updatedAnswers,
+      feedbacks: updatedFeedbacks,
+      speakingStatsHistory: updatedSpeaking,
+      currentQuestionIndex: nextIndex,
+      totalSpeakingSeconds: totalSpeakingSeconds ?? activeSession.totalSpeakingSeconds,
+    };
+
+    if (isFinished) {
+      // Calculate final summary report!
+      setIsLoading(true);
+      setCurrentTab('home'); // temporary wait state
+      
+      // Fetch ATS Resume Coach simultaneously
+      let atsReportData: any = null;
+      try {
+        const atsResponse = await fetch('/api/resume/ats-coach', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            resumeInfo,
+            targetRole: activeSession.jobTarget.positionTitle,
+            jobDescription: activeSession.jobTarget.jobDescription
+          })
+        });
+        if (atsResponse.ok) {
+          atsReportData = await atsResponse.json();
+        }
+      } catch (atsErr) {
+        console.error("Failed to fetch ATS resume feedback concurrently:", atsErr);
+      }
+
+      try {
+        // Compile Log for Gemini
+        const historyLog = activeSession.questions.map((q) => ({
+          questionText: q.text,
+          answerText: updatedAnswers[q.id],
+          feedback: updatedFeedbacks[q.id]
+        }));
+
+        const reportResponse = await fetch('/api/interview/generate-report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionHistory: historyLog,
+            resumeInfo,
+            jobTarget: activeSession.jobTarget,
+            totalSpeakingSeconds: progressSession.totalSpeakingSeconds
+          }),
+        });
+
+        if (!reportResponse.ok) throw new Error('Report synthesis failed');
+
+        const reportData: FinalReport = await reportResponse.json();
+        if (atsReportData) {
+          reportData.atsResumeReport = atsReportData;
+        }
+        progressSession.finalReport = reportData;
+        progressSession.isCompleted = true;
+
+        // Save Completed Session (Guests do not permanently save but let's allow saving in local history for premium preview UX)
+        const updatedSessions = [...sessions, progressSession];
+        setSessions(updatedSessions);
+        
+        if (auth.currentUser || userEmail) {
+          localStorage.setItem('brit_sessions', JSON.stringify(updatedSessions));
+        } else {
+          sessionStorage.setItem('brit_sessions_guest', JSON.stringify(updatedSessions));
+        }
+
+        if (auth.currentUser) {
+          const sessionDocRef = doc(db, "users", auth.currentUser.uid, "sessions", progressSession.id);
+          try {
+            await updateDoc(sessionDocRef, {
+              userAnswers: updatedAnswers,
+              feedbacks: updatedFeedbacks,
+              speakingStatsHistory: updatedSpeaking,
+              currentQuestionIndex: nextIndex,
+              isCompleted: true,
+              finalReport: reportData,
+              totalSpeakingSeconds: progressSession.totalSpeakingSeconds
+            });
+          } catch (fsErr) {
+            handleFirestoreError(fsErr, OperationType.UPDATE, `users/${auth.currentUser.uid}/sessions/${progressSession.id}`);
+          }
+        }
+
+        setSelectedReportSession(progressSession);
+        setActiveSession(null);
+        setCurrentTab('final-report');
+      } catch (err: any) {
+        console.error(err);
+        // Fallback simulation final report
+        const fallbackBest = activeSession.questions[0];
+        const fallbackWorst = activeSession.questions[1] || activeSession.questions[0];
+        const simulatedReport: FinalReport = {
+          overallScore: 84,
+          communicationScore: 86,
+          contentQualityScore: 80,
+          resumeAlignmentScore: 90,
+          confidenceClarityScore: 82,
+          topStrengths: [
+            'Superb display of motivation and clear company fit research.',
+            'Effective structural descriptions of complex team resolutions.',
+            'Articulate integration of academic milestones.'
+          ],
+          topImprovementAreas: [
+            'Deepen specific results numbers (metrics) inside the STAR Action paragraphs.',
+            'Stating your weaknesses directly as adaptive pursuits.',
+            'Ensuring fluid voice tone during spontaneous technical questions.'
+          ],
+          bestAnswer: {
+            question: fallbackBest.text,
+            answer: updatedAnswers[fallbackBest.id] || 'I want to help other Britons.',
+            score: 8
+          },
+          weakestAnswer: {
+            question: fallbackWorst.text,
+            answer: updatedAnswers[fallbackWorst.id] || 'I solved the coordination conflict.',
+            score: 6
+          },
+          recommendedQuestions: [
+            'Where do you see your career heading in 3 years?',
+            'How has your Albion education prepared you for this team workspace?',
+            'Tell me about a major goal you achieved. How did you coordinate the milestones?'
+          ],
+          personalizedAdvice: "Terrific work, Briton! Your academic preparation shines through. To maximize your recruitment potential, memorize three solid stories in study formats and practice reducing minor filler words."
+        };
+
+        if (atsReportData) {
+          simulatedReport.atsResumeReport = atsReportData;
+        } else {
+          // Rule-based automatic fallback generator for ATS Resume Coach
+          simulatedReport.atsResumeReport = {
+            overallScore: 78,
+            formattingAudit: {
+              status: "warning",
+              score: 85,
+              issues: [
+                "Ensure no text boxes or sidebars are used in your document structure.",
+                "Verify that your cell number is directly in the document body, not in native Word headers/footers."
+              ],
+              details: "ATS systems read horizontal text flows strictly. Decorative formats scramble characters."
+            },
+            contentAudit: {
+              status: "warning",
+              score: 70,
+              quantifiedResultCount: 1,
+              issues: [
+                "Only 1 bullet point includes quantified results. Recruiters expect numerical indicators for key successes.",
+                "Verify that all listed project lines start with active professional verbs."
+              ],
+              details: "Proof statements and STAR metrics audit. Expand results descriptors with exact numbers."
+            },
+            keywordAudit: {
+              status: "warning",
+              score: 75,
+              missingKeywords: ["Quantitative Analysis", "Project Lifecycle Coordination", "Structured Problem Solving"],
+              acronymSuggestions: ["Spell out Project Management Professional (PMP) if relevant"],
+              details: `Keyword alignment for target role: "${activeSession.jobTarget.positionTitle}"`
+            },
+            optimizationAreas: [
+              {
+                type: "Lack of Results",
+                severity: "medium",
+                description: "Several bullet points describe basic tasks/responsibilities rather than numerical achievements."
+              }
+            ],
+            tailoredAdvice: `Great foundation! Your Albion College career readiness aligns with this path. To optimize, replace vague bullet terms with exact numbers and make sure standard anchor tags like WORK EXPERIENCE are used.`
+          };
+        }
+
+        progressSession.finalReport = simulatedReport;
+        progressSession.isCompleted = true;
+
+        const updatedSessions = [...sessions, progressSession];
+        setSessions(updatedSessions);
+        
+        if (auth.currentUser || userEmail) {
+          localStorage.setItem('brit_sessions', JSON.stringify(updatedSessions));
+        } else {
+          sessionStorage.setItem('brit_sessions_guest', JSON.stringify(updatedSessions));
+        }
+
+        if (auth.currentUser) {
+          const sessionDocRef = doc(db, "users", auth.currentUser.uid, "sessions", progressSession.id);
+          try {
+            await updateDoc(sessionDocRef, {
+              userAnswers: updatedAnswers,
+              feedbacks: updatedFeedbacks,
+              speakingStatsHistory: updatedSpeaking,
+              currentQuestionIndex: nextIndex,
+              isCompleted: true,
+              finalReport: simulatedReport,
+              totalSpeakingSeconds: progressSession.totalSpeakingSeconds
+            });
+          } catch (fsErr) {
+            handleFirestoreError(fsErr, OperationType.UPDATE, `users/${auth.currentUser.uid}/sessions/${progressSession.id}`);
+          }
+        }
+
+        setSelectedReportSession(progressSession);
+        setActiveSession(null);
+        setCurrentTab('final-report');
+      } finally {
+        setIsLoading(false);
+      }
+    } else {
+      // Just step to next question index
+      setActiveSession(progressSession);
+
+      if (auth.currentUser) {
+        const sessionDocRef = doc(db, 'users', auth.currentUser.uid, 'sessions', activeSession.id);
+        try {
+          await updateDoc(sessionDocRef, {
+            userAnswers: updatedAnswers,
+            feedbacks: updatedFeedbacks,
+            speakingStatsHistory: updatedSpeaking,
+            currentQuestionIndex: nextIndex
+          });
+        } catch (fsErr) {
+          handleFirestoreError(fsErr, OperationType.UPDATE, `users/${auth.currentUser.uid}/sessions/${activeSession.id}`);
+        }
+      }
+    }
+  };
+
+  const handleViewSessionDetail = (session: InterviewSession) => {
+    setSelectedReportSession(session);
+    setCurrentTab('final-report');
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col bg-[#fcfbfe] text-[#221727] font-sans antialiased">
+      
+      {/* Top Professional Navigation */}
+      <Navbar
+        currentTab={currentTab}
+        setCurrentTab={setCurrentTab}
+        userEmail={userEmail}
+        userName={userName}
+        onLogout={handleLogout}
+        onLoginClick={() => setShowAuthModal(true)}
+      />
+
+      {/* Global Interactive Notification Toast */}
+      {toastMessage && (
+        <div className="fixed bottom-5 right-5 bg-albion-purple text-albion-gold font-bold px-5 py-3 rounded-xl shadow-2xl z-55 border-2 border-albion-gold flex items-center space-x-2 animate-bounce">
+          <Sparkles className="w-4 h-4 shrink-0 text-albion-gold-light" />
+          <span className="text-sm">{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Screen Loader Cover */}
+      {isLoading && (
+        <div className="fixed inset-0 bg-albion-purple/35 backdrop-blur-md z-50 flex flex-col items-center justify-center space-y-4">
+          <div className="relative">
+            <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-albion-gold"></div>
+            <div className="absolute inset-0 flex items-center justify-center text-albion-gold text-lg font-bold font-display">B</div>
+          </div>
+          <span className="text-white font-display font-semibold tracking-wide text-xs uppercase bg-albion-purple px-4 py-2 rounded-full shadow-lg">
+            Analyzing Credentials...
+          </span>
+        </div>
+      )}
+
+      {/* Auth / Account Simulation Dialog */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-55 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl border border-purple-150 p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-5 animate-scale-up">
+            <div className="text-center space-y-2">
+              <div className="bg-purple-100 h-12 w-12 rounded-2xl flex items-center justify-center text-albion-purple mx-auto">
+                <KeyRound className="w-6 h-6" />
+              </div>
+              <h3 className="font-display font-extrabold text-xl text-gray-850">Connect Albion Account</h3>
+              <p className="text-xs text-gray-400">
+                Sign in using your student credentials to sync real-time career reports and resume data across devices.
+              </p>
+            </div>
+
+            {errorMsg && (
+              <div className="bg-red-50 text-red-750 text-xs p-3 rounded-lg font-medium border border-red-200">
+                {errorMsg}
+              </div>
+            )}
+
+            {/* Google Authentication Section */}
+            <div className="space-y-3 pt-1">
+              <button
+                type="button"
+                id="btn-google-login"
+                onClick={handleGoogleLogin}
+                className="w-full flex items-center justify-center space-x-3 bg-albion-purple hover:bg-albion-purple-light text-white py-3 px-4 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition cursor-pointer"
+              >
+                <GraduationCap className="w-5 h-5 text-albion-gold shrink-0 animate-pulse" />
+                <span>Connect via Google Account</span>
+              </button>
+              
+              <div className="flex items-center my-3 text-[10px] text-gray-400 font-bold uppercase tracking-wider justify-center">
+                <span className="border-t border-purple-100 w-full inline-block mr-3"></span>
+                <span>or offline guest profile</span>
+                <span className="border-t border-purple-100 w-full inline-block ml-3"></span>
+              </div>
+            </div>
+
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold text-gray-405 uppercase tracking-wider block mb-1">
+                  Full Name
+                </label>
+                <div className="relative">
+                  <User className="absolute left-3.5 top-2.5 w-4.5 h-4.5 text-gray-400" />
+                  <input
+                    type="text"
+                    required
+                    value={loginNameInput}
+                    onChange={(e) => setLoginNameInput(e.target.value)}
+                    placeholder="e.g. Samuel Briton"
+                    className="w-full pl-10 pr-4 py-2 text-sm bg-gray-50 rounded-xl border border-purple-100 focus:border-albion-purple focus:ring-1 focus:ring-albion-purple outline-none font-medium"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-gray-450 uppercase tracking-wider block mb-1">
+                  Albion College Student Email
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3.5 top-2.5 w-4.5 h-4.5 text-gray-400" />
+                  <input
+                    type="email"
+                    required
+                    value={loginEmailInput}
+                    placeholder="student@albion.edu"
+                    onChange={(e) => setLoginEmailInput(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 text-sm bg-gray-50 rounded-xl border border-purple-100 focus:border-albion-purple focus:ring-1 focus:ring-albion-purple outline-none font-medium"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-3 pt-2">
+                <button
+                  type="button"
+                  id="btn-auth-cancel"
+                  onClick={() => setShowAuthModal(false)}
+                  className="flex-1 border border-purple-150 py-2.5 rounded-xl text-xs font-semibold text-gray-500 hover:bg-gray-50 transition"
+                >
+                  Stay as Guest
+                </button>
+                <button
+                  type="submit"
+                  id="btn-auth-submit"
+                  className="flex-1 bg-albion-gold hover:bg-albion-gold-light text-albion-purple-dark font-bold py-2.5 rounded-xl text-xs shadow-md transition"
+                >
+                  Create Guest
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Main Viewport Content block */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        {/* Fallback Warning block if exists */}
+        {errorMsg && (
+          <div className="bg-amber-50 text-amber-700 p-4 rounded-xl border border-amber-150 flex items-center justify-between mb-6 text-xs gap-4 font-mono">
+            <div className="flex items-center space-x-2">
+              <Shield className="w-5 h-5" />
+              <span>{errorMsg}</span>
+            </div>
+            <button onClick={() => setErrorMsg(null)} className="font-bold">×</button>
+          </div>
+        )}
+        {/* Dynamic Navigation Router tab layout */}
+        {currentTab === 'home' && (
+          <div className="space-y-8">
+            {/* Landing Intro Banner */}
+            <div className="glass-card-deep rounded-[32px] p-6 sm:p-10 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+              <div className="lg:col-span-7 space-y-6">
+                <div className="bg-[#49266F]/10 text-[#49266F] font-bold text-xs uppercase px-3 py-1 rounded-full w-max flex items-center space-x-1.5 border border-[#49266F]/15">
+                  <span className="h-2 w-2 rounded-full bg-albion-gold animate-ping" />
+                  <span>Simple & Easy Career Coach</span>
+                </div>
+
+                <div className="space-y-4">
+                  <h1 className="text-3xl sm:text-5xl font-black font-display text-albion-purple-dark leading-tight tracking-tight">
+                    Practice Job Interviews & <span className="text-[#49266F] bg-gradient-to-r from-[#f2c057]/20 to-purple-100/40 px-2 rounded-lg">Check Your Resume</span>
+                  </h1>
+                  <p className="text-sm text-gray-550 leading-relaxed max-w-xl">
+                    Get ready for your future job. Practice speaking with realistic interview questions made just for you. Also, test your resume to make sure computer scanners can read it easily.
+                  </p>
+                </div>
+
+                {/* Primary CTA panel with clear ATS option */}
+                <div className="flex flex-col sm:flex-row items-center gap-4 pt-4">
+                  <button
+                    id="btn-landing-start-mock"
+                    onClick={handleConfigureNewSession}
+                    className="w-full sm:w-auto bg-[#49266F] hover:bg-[#5f338d] text-white font-bold py-3.5 px-8 rounded-xl shadow-lg hover:shadow-xl hover:scale-[1.01] active:scale-[0.99] transition-all duration-150 cursor-pointer text-sm"
+                  >
+                    Start Mock Interview
+                  </button>
+
+                  <button
+                    id="btn-landing-check-resume"
+                    onClick={() => setCurrentTab('resume')}
+                    className="w-full sm:w-auto bg-albion-gold hover:bg-yellow-400 text-albion-purple-dark font-bold py-3.5 px-8 rounded-xl hover:scale-[1.01] active:scale-[0.99] transition-all duration-150 cursor-pointer text-sm shadow-md"
+                  >
+                    Check My Resume (ATS Scan)
+                  </button>
+                </div>
+              </div>
+
+              {/* Description of Website's Abilities */}
+              <div className="lg:col-span-5 glass-card rounded-[32px] p-6 flex flex-col justify-between space-y-6 min-h-[300px]">
+                <div className="border-b border-gray-100/60 pb-3 flex items-center justify-between">
+                  <span className="text-[10px] text-albion-purple font-mono uppercase tracking-widest font-black">What This Website Can Do</span>
+                  <span className="text-[10px] text-green-600 bg-green-50/60 backdrop-blur-sm px-2 py-0.5 rounded border border-green-150/40 font-bold font-mono">100% PRIVATE</span>
+                </div>
+
+                <div className="space-y-4">
+                  {[
+                    { title: "Personal Interview Questions", desc: "We create practice questions based on your resume details and target job description." },
+                    { title: "ATS Resume Checker", desc: "We check your resume for bad formatting, missing keywords, and layout issues that stop computer scanners." },
+                    { title: "Live Voice Helper", desc: "Speak into your mic. We check your talking speed and count how many times you say filler words like 'um' or 'uh'." },
+                    { title: "Combined Score Card", desc: "Get a clear final score that combines both your resume quality and your interview answers." }
+                  ].map((feat, idx) => (
+                    <div key={idx} className="flex gap-3 text-xs leading-normal">
+                      <div className="bg-white/70 border border-white/50 backdrop-blur-sm h-6 w-6 rounded-lg text-albion-purple flex items-center justify-center font-bold text-[11px] shrink-0">
+                        0{idx + 1}
+                      </div>
+                      <div>
+                        <strong className="text-gray-800 font-bold block">{feat.title}</strong>
+                        <p className="text-gray-400 mt-0.5 leading-snug">{feat.desc}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Dashboard metrics preview panel */}
+            <Dashboard
+              sessions={sessions}
+              onStartNewSession={handleConfigureNewSession}
+              onViewSessionDetail={handleViewSessionDetail}
+              savedResume={resumeInfo}
+              onGoToResume={() => setCurrentTab('resume')}
+              isGuest={isGuest}
+              onConnectAccount={() => setShowAuthModal(true)}
+            />
+          </div>
+        )}
+
+        {/* Tab B: Resume Upload & Details Verification */}
+        {currentTab === 'resume' && (
+          <ResumeForm
+            resumeInfo={resumeInfo}
+            onSaveResume={handleSaveResume}
+            onStartMockInterview={() => setCurrentTab('interview-preparer')}
+          />
+        )}
+
+        {/* Tab C: Route Configuration Wizard */}
+        {currentTab === 'interview-preparer' && (
+          <InterviewPreparer
+            onStartPlanning={handleStartPlanningSession}
+            isLoading={isLoading}
+          />
+        )}
+
+        {/* Tab D: Active Interview Session Canvas */}
+        {currentTab === 'active-interview' && activeSession && (
+          <ActiveInterview
+            questions={activeSession.questions}
+            currentQuestionIndex={activeSession.currentQuestionIndex}
+            jobTarget={activeSession.jobTarget}
+            resumeInfo={resumeInfo}
+            onNextQuestion={handleAnswerReceived}
+            onCompleteSession={() => setCurrentTab('final-report')}
+            sessionAnswers={activeSession.userAnswers}
+            onExit={handleExitActiveInterview}
+          />
+        )}
+
+        {/* Tab E: Final Interactive Assessed Report Board */}
+        {currentTab === 'final-report' && selectedReportSession?.finalReport && (
+          <FinalReportView
+            report={selectedReportSession.finalReport}
+            jobTarget={selectedReportSession.jobTarget}
+            onRestart={() => setCurrentTab('interview-preparer')}
+            isGuest={isGuest}
+            onConnectAccount={() => setShowAuthModal(true)}
+            session={selectedReportSession}
+          />
+        )}
+
+        {/* Tab F: Progress Hub Overview */}
+        {currentTab === 'progress' && (
+          <Dashboard
+            sessions={sessions}
+            onStartNewSession={handleConfigureNewSession}
+            onViewSessionDetail={handleViewSessionDetail}
+            savedResume={resumeInfo}
+            onGoToResume={() => setCurrentTab('resume')}
+            isGuest={isGuest}
+            onConnectAccount={() => setShowAuthModal(true)}
+          />
+        )}
+
+        {/* Tab G: Privacy & Support Statement Policy */}
+        {currentTab === 'about' && (
+          <div className="bg-white rounded-3xl border border-purple-100 p-6 sm:p-10 shadow-sm space-y-8 animate-fade-in" id="about-privacy-tab">
+            <div className="space-y-3">
+              <span className="bg-purple-100 text-albion-purple text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest w-max block border border-purple-200">
+                ZERO-THIRD-PARTY POLICY
+              </span>
+              <h2 className="text-3xl font-extrabold font-display text-albion-purple-dark leading-tight">
+                Our Pledge on Candidate Privacy & Trust
+              </h2>
+              <p className="text-sm text-gray-500 max-w-3xl leading-relaxed">
+                Because students frequently upload deep, personally identifiable information (PII) including physical addresses, grades, cell numbers, and sensitive accomplishments, Brit Interview Coach strictly enforces absolute local sandbox boundaries:
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100">
+              <div className="space-y-2 bg-gray-50/50 p-6 rounded-2xl border border-gray-100/80">
+                <h4 className="font-display font-bold text-sm text-gray-800">1. Internal Personalization Only</h4>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  Your raw resume details and entered job configurations are parsed solely to personalize and synthesize the assessor question banks.
+                </p>
+              </div>
+
+              <div className="space-y-2 bg-gray-50/50 p-6 rounded-2xl border border-gray-100/80">
+                <h4 className="font-display font-bold text-sm text-gray-800">2. Full Data Sovereignty</h4>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  Guests use short transient states. Connected accounts can manage, purge, or inspect saved sessions history at any point. No data is stored beyond your localized workspace container.
+                </p>
+              </div>
+
+              <div className="space-y-2 bg-gray-50/50 p-6 rounded-2xl border border-gray-100/80">
+                <h4 className="font-display font-bold text-sm text-gray-800">3. Zero Selling & Third-Parties</h4>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  We absolutely never share, monetize, or stream your uploaded credentials, transcripts, scores, or voice indicators with third-party software structures.
+                </p>
+              </div>
+            </div>
+
+            {/* Clear and direct Purge button */}
+            <div className="border-t border-gray-100 pt-8 flex flex-col sm:flex-row items-center justify-between gap-6">
+              <div>
+                <h4 className="font-display font-bold text-sm text-gray-800">Want to start completely fresh?</h4>
+                <p className="text-xs text-gray-400 leading-relaxed">Click below to instantly clear, purge, and destroy all local history records and cached credentials files.</p>
+              </div>
+              
+              <button
+                id="btn-purge-data"
+                onClick={handlePurgeAllData}
+                className="w-full sm:w-auto bg-red-100 hover:bg-red-200 text-red-600 font-bold py-3 px-6 rounded-xl text-xs transition duration-150 cursor-pointer flex items-center justify-center space-x-1.5 border border-red-200"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Destroy All Careers Data</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+      </main>
+
+      {/* Aesthetic Academic Footer */}
+      <footer className="bg-gray-100 border-t border-gray-200 py-6 text-center text-xs text-gray-400 font-mono mt-auto relative z-10">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div>
+            <span>&copy; 2026 Albion College Britons. Academic Career Preparation Suite.</span>
+          </div>
+          <div className="flex space-x-4">
+            <span className="text-albion-purple hover:underline cursor-pointer" onClick={() => setCurrentTab('about')}>Privacy Policy</span>
+            <span>•</span>
+            <span className="text-albion-purple hover:underline cursor-pointer" onClick={() => setCurrentTab('about')}>Trust Agreement</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Brit Interview Coach",
+  "description": "An AI-powered mock interview preparation app tailored for Albion College students to practice, get feedback, and build career confidence.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

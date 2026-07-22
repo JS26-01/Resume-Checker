@@ -1,0 +1,321 @@
+{
+  "entities": {
+    "ResumeInfo": {
+      "title": "ResumeInfo",
+      "description": "Details extracted from the student's resume.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The student's full name"
+        },
+        "education": {
+          "type": "string",
+          "description": "Education background, e.g., Albion College"
+        },
+        "majorMinor": {
+          "type": "string",
+          "description": "Majors and minors studied"
+        },
+        "skills": {
+          "type": "array",
+          "description": "Array of skills and competencies"
+        },
+        "workExperience": {
+          "type": "array",
+          "description": "Array of employment accomplishments"
+        },
+        "researchExperience": {
+          "type": "array",
+          "description": "Array of research or laboratory accomplishments"
+        },
+        "projects": {
+          "type": "array",
+          "description": "Array of key course or personal projects"
+        },
+        "leadership": {
+          "type": "array",
+          "description": "Array of student organization or leadership details"
+        },
+        "certifications": {
+          "type": "array",
+          "description": "Array of awards or credentials"
+        },
+        "isParsed": {
+          "type": "boolean",
+          "description": "Flag to mark if parsed from raw resume"
+        }
+      },
+      "required": ["name", "education", "majorMinor"]
+    },
+    "JobTarget": {
+      "title": "JobTarget",
+      "description": "The targeted career role configured for the interview.",
+      "type": "object",
+      "properties": {
+        "positionTitle": {
+          "type": "string",
+          "description": "Name of position, internship, or research path"
+        },
+        "companyName": {
+          "type": "string",
+          "description": "Target company, lab, or graduate school"
+        },
+        "industry": {
+          "type": "string",
+          "description": "The professional sector"
+        },
+        "interviewType": {
+          "type": "string",
+          "description": "The type of interview vibe, e.g. behavioral, technical, general"
+        },
+        "difficulty": {
+          "type": "string",
+          "description": "Beginner, standard, or challenging complexity level"
+        },
+        "focusCategory": {
+          "type": "string",
+          "description": "Optional Albion focus or liberal arts category"
+        }
+      },
+      "required": ["positionTitle", "companyName", "industry", "interviewType", "difficulty"]
+    },
+    "SpeakingStats": {
+      "title": "SpeakingStats",
+      "description": "Speech pace, pause, and filler word diagnostics",
+      "type": "object",
+      "properties": {
+        "paceWpm": {
+          "type": "number",
+          "description": "Speech pace in words per minute"
+        },
+        "longPausesCount": {
+          "type": "number",
+          "description": "Number of significant pauses of 2s+ detected"
+        },
+        "fillerWordsCount": {
+          "type": "number",
+          "description": "Total number of filler words spoken"
+        },
+        "fillerWordsList": {
+          "type": "array",
+          "description": "List of distinct filler words used"
+        },
+        "volumeConsistency": {
+          "type": "string",
+          "description": "Volume style feedback, e.g., steady, fluctuating, or low"
+        },
+        "eyeContactEstimatePercentage": {
+          "type": "number",
+          "description": "Estimated average percentage of eye contact duration"
+        },
+        "facialEngagementEstimatePercentage": {
+          "type": "number",
+          "description": "Estimated facial muscle movement/engagement scoring"
+        },
+        "nervousnessIndicators": {
+          "type": "array",
+          "description": "Observed nervousness physical or audio ticks"
+        }
+      },
+      "required": ["paceWpm", "longPausesCount", "fillerWordsCount"]
+    },
+    "QuestionFeedback": {
+      "title": "QuestionFeedback",
+      "description": "Constructive granular review of a single question answer",
+      "type": "object",
+      "properties": {
+        "score": {
+          "type": "number",
+          "description": "Value out of 10"
+        },
+        "strengths": {
+          "type": "array",
+          "description": "What went well"
+        },
+        "areasToImprove": {
+          "type": "array",
+          "description": "Specific recommendations for polish"
+        },
+        "suggestedAnswer": {
+          "type": "string",
+          "description": "A high-impact model response"
+        },
+        "clarityComments": {
+          "type": "string",
+          "description": "Critique of response layout and language flow"
+        },
+        "confidenceComments": {
+          "type": "string",
+          "description": "Feedback on assurance and conviction"
+        },
+        "structureComments": {
+          "type": "string",
+          "description": "Structural correctness"
+        },
+        "relevanceComments": {
+          "type": "string",
+          "description": "Relevance to requested context"
+        },
+        "professionalismComments": {
+          "type": "string",
+          "description": "Politeness and business alignment"
+        },
+        "starAnalysis": {
+          "type": "string",
+          "description": "Explicit STAR mapping assessment (situation, task, action, result) for behavioral prompts"
+        },
+        "speakingAnalysis": {
+          "$ref": "#/entities/SpeakingStats"
+        }
+      },
+      "required": ["score", "strengths", "areasToImprove", "suggestedAnswer"]
+    },
+    "InterviewQuestion": {
+      "title": "InterviewQuestion",
+      "description": "A distinct generated inquiry to ask the student",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Inquiry index ID"
+        },
+        "text": {
+          "type": "string",
+          "description": "Literal text of the prompt question"
+        },
+        "category": {
+          "type": "string",
+          "description": "Structural type of question, e.g. behavioral, technical, closing"
+        }
+      },
+      "required": ["id", "text", "category"]
+    },
+    "FinalReport": {
+      "title": "FinalReport",
+      "description": "Aggregated overall assessment of the completed session",
+      "type": "object",
+      "properties": {
+        "overallScore": {
+          "type": "number",
+          "description": "Average overall readiness score (1-100)"
+        },
+        "communicationScore": {
+          "type": "number",
+          "description": "Communication capability metric (1-100)"
+        },
+        "contentQualityScore": {
+          "type": "number",
+          "description": "Depth of facts and resume references (1-100)"
+        },
+        "resumeAlignmentScore": {
+          "type": "number",
+          "description": "Quality of resume alignment (1-100)"
+        },
+        "confidenceClarityScore": {
+          "type": "number",
+          "description": "Delivery clarity index (1-100)"
+        },
+        "topStrengths": {
+          "type": "array",
+          "description": "Three primary highlights"
+        },
+        "topImprovementAreas": {
+          "type": "array",
+          "description": "Three prime improvement opportunities"
+        },
+        "personalizedAdvice": {
+          "type": "string",
+          "description": "Director's final summation and encouraging notes"
+        }
+      },
+      "required": ["overallScore", "communicationScore", "contentQualityScore", "topStrengths", "topImprovementAreas", "personalizedAdvice"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Main parent profile details for the registered student",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "Validated Albion student identity email"
+        },
+        "name": {
+          "type": "string",
+          "description": "Student's registered name"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Date registration was made"
+        },
+        "savedResume": {
+          "$ref": "#/entities/ResumeInfo"
+        }
+      },
+      "required": ["email", "name", "createdAt"]
+    },
+    "InterviewSession": {
+      "title": "InterviewSession",
+      "description": "Comprehensive document tracking progress, logs, and scoring of a single mock session",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The unique session identifier"
+        },
+        "date": {
+          "type": "string",
+          "description": "Formatted date string when interview was initiated"
+        },
+        "jobTarget": {
+          "$ref": "#/entities/JobTarget"
+        },
+        "resumeInfo": {
+          "$ref": "#/entities/ResumeInfo"
+        },
+        "questions": {
+          "type": "array",
+          "description": "Inquiry database compiled for this session"
+        },
+        "currentQuestionIndex": {
+          "type": "number",
+          "description": "The current question pointer"
+        },
+        "userAnswers": {
+          "type": "object",
+          "description": "Map mapping question IDs to the student's answered scripts"
+        },
+        "feedbacks": {
+          "type": "object",
+          "description": "Map mapping question IDs to specific QuestionFeedback"
+        },
+        "speakingStatsHistory": {
+          "type": "object",
+          "description": "Map mapping question IDs to specific speech diagnostics stats"
+        },
+        "isCompleted": {
+          "type": "boolean",
+          "description": "Flags if session reached full conclusion reporting"
+        },
+        "finalReport": {
+          "$ref": "#/entities/FinalReport"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Reference lookup copy for indexing"
+        }
+      },
+      "required": ["id", "date", "jobTarget", "currentQuestionIndex", "isCompleted", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "#/entities/UserAccount",
+      "description": "User profiles for authenticated Albion College students."
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": "#/entities/InterviewSession",
+      "description": "Granular, secure historic log records of completed mock interview run-throughs."
+    }
+  }
+}

@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net default-deny catch-all rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitive Helpers and Global Guards
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isOwner(userId) && request.auth.token.email_verified == true;
+    }
+
+    // Entities Schemas Validation Helper functions
+
+    function isValidResumeInfo(resume) {
+      return resume == null || (
+        resume.name is string && resume.name.size() <= 100 &&
+        resume.education is string && resume.education.size() <= 200 &&
+        resume.majorMinor is string && resume.majorMinor.size() <= 200 &&
+        resume.skills is list && resume.skills.size() <= 50 &&
+        resume.workExperience is list && resume.workExperience.size() <= 20 &&
+        resume.researchExperience is list && resume.researchExperience.size() <= 20 &&
+        resume.projects is list && resume.projects.size() <= 20 &&
+        resume.leadership is list && resume.leadership.size() <= 20 &&
+        resume.certifications is list && resume.certifications.size() <= 20 &&
+        (!resume.keys().hasAny(['isParsed']) || resume.isParsed is bool)
+      );
+    }
+
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['email', 'name', 'createdAt']) &&
+             data.keys().size() >= 3 && data.keys().size() <= 5 &&
+             data.email is string && data.email.size() <= 128 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.createdAt is string && data.createdAt.size() <= 100 &&
+             (!data.keys().hasAny(['savedResume']) || isValidResumeInfo(data.savedResume));
+    }
+
+    function isValidJobTarget(job) {
+      return job.positionTitle is string && job.positionTitle.size() <= 100 &&
+             job.companyName is string && job.companyName.size() <= 100 &&
+             job.industry is string && job.industry.size() <= 100 &&
+             job.interviewType is string && job.interviewType.size() <= 100 &&
+             job.difficulty is string && job.difficulty.size() <= 100 &&
+             (!job.keys().hasAny(['focusCategory']) || (job.focusCategory is string && job.focusCategory.size() <= 100));
+    }
+
+    function isValidQuestionsList(questions) {
+      return questions is list && questions.size() <= 10 && (
+        questions.size() == 0 || (
+          questions[0].id is string &&
+          questions[0].text is string &&
+          questions[0].category is string
+        )
+      );
+    }
+
+    function isValidSpeakingStats(stats) {
+      return stats.paceWpm is int &&
+             stats.longPausesCount is int &&
+             stats.fillerWordsCount is int &&
+             stats.fillerWordsList is list && stats.fillerWordsList.size() <= 50 &&
+             stats.volumeConsistency is string && stats.volumeConsistency.size() <= 50 &&
+             stats.eyeContactEstimatePercentage is int &&
+             stats.facialEngagementEstimatePercentage is int &&
+             stats.nervousnessIndicators is list && stats.nervousnessIndicators.size() <= 50;
+    }
+
+    function isValidFeedback(f) {
+      return f.score is int && f.score >= 1 && f.score <= 10 &&
+             f.strengths is list && f.strengths.size() <= 5 &&
+             f.areasToImprove is list && f.areasToImprove.size() <= 5 &&
+             f.suggestedAnswer is string && f.suggestedAnswer.size() <= 5000 &&
+             f.clarityComments is string && f.clarityComments.size() <= 2000 &&
+             f.confidenceComments is string && f.confidenceComments.size() <= 2000 &&
+             f.structureComments is string && f.structureComments.size() <= 2000 &&
+             f.relevanceComments is string && f.relevanceComments.size() <= 2000 &&
+             f.professionalismComments is string && f.professionalismComments.size() <= 2000 &&
+             (!f.keys().hasAny(['starAnalysis']) || (f.starAnalysis == null || (f.starAnalysis is string && f.starAnalysis.size() <= 4000))) &&
+             (!f.keys().hasAny(['speakingAnalysis']) || isValidSpeakingStats(f.speakingAnalysis));
+    }
+
+    function isValidSpeakingStatsMap(statsMap) {
+      return statsMap is map && statsMap.keys().size() <= 10;
+    }
+
+    function isValidFeedbacksMap(feedbacksMap) {
+      return feedbacksMap is map && feedbacksMap.keys().size() <= 10;
+    }
+
+    function isValidAnswersMap(answersMap) {
+      return answersMap is map && answersMap.keys().size() <= 10;
+    }
+
+    function isValidFinalReport(report) {
+      return report == null || (
+        report.overallScore is int && report.overallScore >= 0 && report.overallScore <= 100 &&
+        report.communicationScore is int && report.communicationScore >= 0 && report.communicationScore <= 100 &&
+        report.contentQualityScore is int && report.contentQualityScore >= 0 && report.contentQualityScore <= 100 &&
+        report.resumeAlignmentScore is int && report.resumeAlignmentScore >= 0 && report.resumeAlignmentScore <= 100 &&
+        report.confidenceClarityScore is int && report.confidenceClarityScore >= 0 && report.confidenceClarityScore <= 100 &&
+        report.topStrengths is list && report.topStrengths.size() <= 5 &&
+        report.topImprovementAreas is list && report.topImprovementAreas.size() <= 5 &&
+        report.personalizedAdvice is string && report.personalizedAdvice.size() <= 5000
+      );
+    }
+
+    function isValidInterviewSession(data) {
+      return data.keys().hasAll(['id', 'date', 'jobTarget', 'currentQuestionIndex', 'isCompleted', 'userId', 'questions', 'userAnswers', 'feedbacks', 'speakingStatsHistory']) &&
+             data.keys().size() >= 10 && data.keys().size() <= 12 &&
+             data.id is string && data.id.size() <= 100 &&
+             data.date is string && data.date.size() <= 100 &&
+             isValidJobTarget(data.jobTarget) &&
+             isValidResumeInfo(data.resumeInfo) &&
+             data.currentQuestionIndex is int && data.currentQuestionIndex >= 0 && data.currentQuestionIndex <= 20 &&
+             data.isCompleted is bool &&
+             data.userId is string && data.userId.size() <= 100 &&
+             isValidQuestionsList(data.questions) &&
+             isValidAnswersMap(data.userAnswers) &&
+             isValidFeedbacksMap(data.feedbacks) &&
+             isValidSpeakingStatsMap(data.speakingStatsHistory) &&
+             (!data.keys().hasAny(['finalReport']) || isValidFinalReport(data.finalReport));
+    }
+
+
+    // 1. Users Profile Collection match rules
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      // No blanket list is allowed for users profiles privacy (PII isolation)
+      
+      allow create: if isVerifiedOwner(userId) && isValidId(userId) && isValidUserAccount(incoming());
+      
+      allow update: if isVerifiedOwner(userId) && isValidId(userId) && isValidUserAccount(incoming()) && (
+        incoming().createdAt == existing().createdAt &&
+        incoming().email == existing().email
+      );
+      
+      allow delete: if isVerifiedOwner(userId) && isValidId(userId);
+
+      // 2. Subcollection Sessions match rules
+      match /sessions/{sessionId} {
+        allow get: if isOwner(userId);
+        
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(sessionId) && 
+                         exists(/databases/$(database)/documents/users/$(userId)) && 
+                         isValidInterviewSession(incoming()) && 
+                         incoming().userId == userId;
+        
+        allow update: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(sessionId) && 
+                         incoming().userId == userId &&
+                         incoming().userId == existing().userId &&
+                         isValidInterviewSession(incoming()) && 
+                         existing().isCompleted == false; // Terminal Locking
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(sessionId);
+      }
+    }
+  }
+}
