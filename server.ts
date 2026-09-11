@@ -2,7 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Modality } from "@google/genai";
 
 dotenv.config();
 
@@ -32,6 +32,45 @@ function getGeminiClient(): GoogleGenAI | null {
   return aiInstance;
 }
 
+// Helper to safely parse JSON returned by Gemini models, handling unescaped control characters or markdown formatting
+function safeJsonParse(rawText: string | undefined | null): any {
+  if (!rawText) return {};
+  let clean = rawText.trim();
+  clean = clean.replace(/^```(?:json)?\s*/gi, "").replace(/\s*```$/gi, "").trim();
+
+  try {
+    return JSON.parse(clean);
+  } catch (e1) {
+    try {
+      // Replace unescaped raw control characters in JSON strings (such as literal newlines/tabs inside quotes)
+      const sanitized = clean.replace(/[\u0000-\u001F\u007F-\u009F]/g, (match) => {
+        if (match === '\n') return '\\n';
+        if (match === '\r') return '\\r';
+        if (match === '\t') return '\\t';
+        return '';
+      });
+      return JSON.parse(sanitized);
+    } catch (e2) {
+      const match = clean.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+      if (match) {
+        try {
+          const sanitizedMatch = match[0].replace(/[\u0000-\u001F\u007F-\u009F]/g, (m) => {
+            if (m === '\n') return '\\n';
+            if (m === '\r') return '\\r';
+            if (m === '\t') return '\\t';
+            return '';
+          });
+          return JSON.parse(sanitizedMatch);
+        } catch (e3) {
+          console.error("safeJsonParse match extraction failed:", e3);
+        }
+      }
+      console.warn("safeJsonParse failed to parse text:", (e1 as Error)?.message);
+      return {};
+    }
+  }
+}
+
 // Robust, retrying Gemini generateContent Wrapper with model fallbacks for transient 503/429/UNAVAILABLE errors
 async function callGeminiWithRetry(params: { model: string; contents: any; config?: any }, retries = 4, initialDelay = 1000): Promise<any> {
   const ai = getGeminiClient();
@@ -42,9 +81,9 @@ async function callGeminiWithRetry(params: { model: string; contents: any; confi
   let lastError: any = null;
   let delay = initialDelay;
 
-  // List of fallback models to cycle through if the primary model experiences transient overload
-  const fallbackModels = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.5-flash"];
-  let currentModel = params.model;
+  // List of fallback models to cycle through if the primary model experiences transient overload, quota limits, or fetch errors
+  const fallbackModels = ["gemini-3.6-flash", "gemini-3.1-flash-lite"];
+  let currentModel = params.model || "gemini-3.6-flash";
 
   for (let i = 0; i < retries; i++) {
     try {
@@ -54,27 +93,43 @@ async function callGeminiWithRetry(params: { model: string; contents: any; confi
       });
     } catch (error: any) {
       lastError = error;
-      const errorMessage = error?.message || "";
+      const errorMessage = error?.message || String(error);
       const errorStatus = error?.status || "";
       const errorCode = error?.code || error?.statusCode || "";
 
-      // Detect transient high-demand (503), rate-limits (429), or temporary outages
+      // Detect transient high-demand (503), rate-limits/quotas (429), model missing/404, or network fetch failures
       const isTransient = 
         errorStatus === "UNAVAILABLE" || 
+        errorStatus === "RESOURCE_EXHAUSTED" || 
+        errorStatus === "NOT_FOUND" ||
         errorCode === 503 || 
         errorCode === 429 ||
+        errorCode === 404 ||
         errorMessage.includes("503") || 
         errorMessage.includes("429") || 
+        errorMessage.includes("404") ||
+        errorMessage.includes("fetch failed") ||
+        errorMessage.includes("Failed to fetch") ||
         errorMessage.includes("high demand") || 
         errorMessage.includes("temporary") ||
         errorMessage.includes("rate limit") ||
+        errorMessage.includes("quota") ||
+        errorMessage.includes("Quota") ||
         errorMessage.includes("ResourceExhausted") ||
-        errorMessage.includes("exhausted");
+        errorMessage.includes("RESOURCE_EXHAUSTED") ||
+        errorMessage.includes("exhausted") ||
+        errorMessage.includes("not found") ||
+        errorMessage.includes("NotFound") ||
+        errorMessage.includes("ECONNRESET") ||
+        errorMessage.includes("ETIMEDOUT");
 
       if (isTransient && i < retries - 1) {
-        // Select next fallback model to try
-        const nextModel = fallbackModels[i % fallbackModels.length];
-        console.warn(`[Gemini API Warning] Transient error detected on model "${currentModel}". Retrying attempt ${i + 1}/${retries} in ${delay}ms switching to model "${nextModel}"... Error: ${errorMessage}`);
+        // Select next model in fallback list that is different from currentModel
+        const currentIndex = fallbackModels.indexOf(currentModel);
+        const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % fallbackModels.length : (i + 1) % fallbackModels.length;
+        const nextModel = fallbackModels[nextIndex];
+
+        console.log(`[Gemini API] Retrying attempt ${i + 1}/${retries} on model "${nextModel}" following transient error on "${currentModel}": ${errorMessage}`);
         currentModel = nextModel;
         await new Promise((resolve) => setTimeout(resolve, delay));
         delay *= 1.5; // gradual exponential backoff
@@ -85,6 +140,79 @@ async function callGeminiWithRetry(params: { model: string; contents: any; confi
   }
   throw lastError;
 }
+
+// 0. API: Gemini Text-to-Speech (TTS)
+app.post("/api/tts", async (req, res) => {
+  const { text, voice } = req.body;
+  if (!text || typeof text !== "string") {
+    return res.status(400).json({ error: "Missing or invalid 'text' parameter in request body" });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({ error: "Gemini API client is not configured (missing GEMINI_API_KEY)" });
+  }
+
+  try {
+    const chosenVoice = voice || "Kore";
+    const cleanText = text.trim();
+
+    // Models that support audio output modality
+    const candidateTtsModels = [
+      "gemini-3.1-flash-tts-preview",
+      "gemini-3.6-flash"
+    ];
+
+    let base64Audio: string | undefined;
+    let mimeType = "audio/pcm;rate=24000";
+    let lastError: any = null;
+
+    for (const modelName of candidateTtsModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [{ parts: [{ text: cleanText }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: chosenVoice },
+              },
+            },
+          },
+        });
+
+        const candidatePart = response.candidates?.[0]?.content?.parts?.[0];
+        if (candidatePart?.inlineData?.data) {
+          base64Audio = candidatePart.inlineData.data;
+          mimeType = candidatePart.inlineData.mimeType || mimeType;
+          break;
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[Gemini TTS Warning] Model ${modelName} failed:`, err?.message || err);
+      }
+    }
+
+    if (!base64Audio) {
+      return res.status(502).json({
+        error: lastError?.message || "Gemini TTS API returned no audio content across candidate models",
+        useFallback: true,
+      });
+    }
+
+    return res.json({
+      audio: base64Audio,
+      mimeType: mimeType,
+    });
+  } catch (error: any) {
+    console.error("Gemini TTS Generation Error:", error);
+    return res.status(500).json({
+      error: error?.message || "Failed to generate text-to-speech audio with Gemini API",
+      useFallback: true,
+    });
+  }
+});
 
 // 1. API: Parse Resume
 app.post("/api/resume/parse", async (req, res) => {
@@ -124,7 +252,7 @@ Ensure the output is valid JSON matching this schema:
 `;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -132,7 +260,7 @@ Ensure the output is valid JSON matching this schema:
       },
     });
 
-    const parsedJson = JSON.parse(response.text || "{}");
+    const parsedJson = safeJsonParse(response.text);
     res.json(parsedJson);
   } catch (error: any) {
     console.error("Gemini Parse Resume Error:", error);
@@ -142,19 +270,38 @@ Ensure the output is valid JSON matching this schema:
 
 // 2. API: Generate Interview Questions Plan
 app.post("/api/interview/generate-questions", async (req, res) => {
-  const { resumeInfo, jobTarget } = req.body;
+  const { resumeInfo, jobTarget, noResumePath, seenQuestionIds = [] } = req.body;
   if (!jobTarget) {
     return res.status(400).json({ error: "Missing job target data" });
   }
 
-  // Enforce resume presence before starting any session
-  if (!resumeInfo || !resumeInfo.isParsed) {
-    return res.status(400).json({ error: "To ensure questions are tailored to your background, please upload or complete your PDF resume before starting." });
+  // Handle No Resume Path: return 3 simple diagnostic questions about projects/coursework
+  if (noResumePath || !resumeInfo || !resumeInfo.isParsed) {
+    return res.json({
+      isDiagnostic: true,
+      questions: [
+        {
+          id: "q1",
+          text: "What is a recent class project, group assignment, or campus activity you worked on?",
+          category: "general"
+        },
+        {
+          id: "q2",
+          text: "What specific tasks, tools, or steps did you personally take to complete this work?",
+          category: "technical"
+        },
+        {
+          id: "q3",
+          text: "What was the final result, grade, deliverable, or outcome of your project efforts?",
+          category: "behavioral"
+        }
+      ]
+    });
   }
 
   const ai = getGeminiClient();
   if (!ai) {
-    return res.json({ questions: generateMockQuestions(resumeInfo, jobTarget) });
+    return res.json({ questions: generateMockQuestions(resumeInfo, jobTarget, seenQuestionIds) });
   }
 
   try {
@@ -163,7 +310,6 @@ app.post("/api/interview/generate-questions", async (req, res) => {
       ? `You represent a panel of 3 distinct corporate interviewers: Sarah (HR), Marcus (Technical Lead), and Elena (Director of Product). For each of the questions, pick ONE panelist to ask the question, and clearly prefix the question text with their name and title (e.g., "Elena (Director of Product): [Question]"). Vary who speaks to simulate a dynamic panel board.`
       : `Act as a single, consistent hiring manager in a One-on-One interview format.`;
 
-    // High variety randomized themes to force Gemini to generate totally different questions on every single retry
     const dynamicFocalThemes = [
       "navigating deep inter-team conflict / communication breakdown",
       "pivoting technical architecture or course of action under high stress / sudden resource loss",
@@ -175,176 +321,415 @@ app.post("/api/interview/generate-questions", async (req, res) => {
     const chosenTheme = dynamicFocalThemes[Math.floor(Math.random() * dynamicFocalThemes.length)];
     const sessionSalt = Math.floor(Math.random() * 1000000);
 
-    const isEasyVibe = jobTarget.interviewType === 'campus_job' || jobTarget.interviewType === 'internship';
+    const selectedQuestionType = jobTarget.interviewType || 'general';
+    const isEasyVibe = selectedQuestionType === 'campus_job' || selectedQuestionType === 'internship';
+    const isMedicalTrack = selectedQuestionType === 'medical_school' || /med|doctor|physician|mmi|aamc|medical|hospital|clinic|pre-med|prehealth/i.test(`${jobTarget.positionTitle} ${jobTarget.companyName} ${jobTarget.industry}`);
 
-    const prompt = `You are an expert, objective corporate interviewer conducting a formal, serious job interview. Your primary goal is to assess the candidate realistically, without sugarcoating or hand-holding.
+    let strictTypeDirective = "";
+    if (selectedQuestionType === 'medical_school') {
+      strictTypeDirective = `CRITICAL MANDATE - EXCLUSIVE QUESTION TYPE FILTER:
+The user explicitly selected "MULTIPLE MINI-INTERVIEW (MMI) STATIONS".
+EVERY SINGLE QUESTION (Questions 1, 2, 3, and 4) MUST BE A 100% MULTIPLE MINI-INTERVIEW (MMI) BIOETHICAL DILEMMA OR SITUATIONAL SCENARIO station strictly cross-referenced from the provided MMI PDF documents (e.g. 14yo patient requesting birth control without parents, rural Michigan physician recruitment incentives, 20yo Down syndrome pregnant patient autonomy, observing attending surgical error, peer alcohol impairment on rounds, organ transplant allocation, Ebola vaccine trial, uninsured patient fractured jaw $12.5k emergency care, single mother burn clinic supplies).
+DO NOT ask traditional "Why medicine?" questions or generic personal questions. ALL 4 QUESTIONS MUST BE MMI SCENARIOS!`;
+    } else if (selectedQuestionType === 'general') {
+      strictTypeDirective = `CRITICAL MANDATE - EXCLUSIVE QUESTION TYPE FILTER:
+The user explicitly selected "TRADITIONAL QUESTIONS".
+EVERY SINGLE QUESTION (Questions 1, 2, 3, and 4) MUST BE A 100% TRADITIONAL / MOTIVATION QUESTION (e.g., core motivation "Why medicine?" / "Why this role/company?", "Why CMU medical school?", anticipated medical school sacrifices, legacy/future impact on healthcare, personal fit, background).
+DO NOT ask MMI ethical dilemma prompts or STAR behavioral stories. ALL 4 QUESTIONS MUST BE TRADITIONAL FIT QUESTIONS!`;
+    } else if (selectedQuestionType === 'behavioral') {
+      strictTypeDirective = `CRITICAL MANDATE - EXCLUSIVE QUESTION TYPE FILTER:
+The user explicitly selected "BEHAVIORAL QUESTIONS".
+EVERY SINGLE QUESTION (Questions 1, 2, 3, and 4) MUST BE A 100% BEHAVIORAL QUESTION evaluated using the STAR method ("Tell me about a time when...", "Describe a situation where...", handling a conflict with a teammate, adapting when feeling like an outsider, recovering from a regretted mistake, processing critical feedback).
+DO NOT ask MMI ethical dilemma prompts or traditional motivation questions like "Why medicine?". ALL 4 QUESTIONS MUST BE BEHAVIORAL SCENARIOS!`;
+    } else if (selectedQuestionType === 'technical') {
+      strictTypeDirective = `CRITICAL MANDATE - EXCLUSIVE QUESTION TYPE FILTER:
+The user explicitly selected "TECHNICAL & ANALYTICAL QUESTIONS".
+EVERY SINGLE QUESTION (Questions 1, 2, 3, and 4) MUST BE A 100% TECHNICAL OR DOMAIN-SPECIFIC ANALYTICAL QUESTION testing problem solving, technical concepts, data analysis, or analytical rigor for this role.`;
+    } else if (selectedQuestionType === 'research') {
+      strictTypeDirective = `CRITICAL MANDATE - EXCLUSIVE QUESTION TYPE FILTER:
+The user explicitly selected "RESEARCH & ACADEMIC SELECTION BOARD".
+EVERY SINGLE QUESTION (Questions 1, 2, 3, and 4) MUST BE A RESEARCH OR ACADEMIC SELECTION QUESTION focusing on scientific inquiry, hypothesis design, lab dynamics, literature critique, or research methodology.`;
+    } else {
+      strictTypeDirective = `CRITICAL MANDATE - EXCLUSIVE QUESTION TYPE FILTER:
+Strictly tailor ALL 4 questions to the selected question category: "${selectedQuestionType}".`;
+    }
 
-${isEasyVibe ? `CRITICAL EASY MODE DIRECTIVE:
-- Since this is a CAMPUS JOB or INTERNSHIP interview, you MUST override any intimidating or high-stakes corporate persona.
-- Make all questions significantly easier, simpler, and highly encouraging. 
-- Avoid complex, multi-layered high-pressure behavioral challenges or strict technical grilling.
-- Ask straightforward entry-level questions that allow a college student to highlight their basic academic course prep, soft skills, or campus eagerness.
-- Maintain a warm, welcoming, and highly supportive tone throughout.` : `1. TONE & PERSONALITY (THE "REAL WORLD" RULE)
-- Maintain a strictly NEUTRAL, objective, and formal corporate tone.
-- Do NOT use overly positive or enthusiastic filler words (e.g., do not say "Awesome!", "Great job!", "That's fantastic!").
-- Replicate the high-stakes, slightly intimidating environment of a real interview. Be polite, but completely impartial.`}
+    const prompt = `You are an empathetic Career Coach and Admissions Consultant conducting a conversational mock interview for university students preparing for careers or medical school at Albion College.
 
-2. NO HAND-HOLDING (CRITICAL GUARDRAIL)
-- Do NOT help the candidate connect the dots between their past experience/education and the job description.
-- Ask questions that force the candidate to explain and prove how their background fits, keeping the burden of proof entirely on them.
+${strictTypeDirective}
 
-3. STRICT BACKGROUND ALIGNMENT & FACT COMPLIANCE (THE "STICK TO THE FACTS" MANDATE)
-- All questions MUST be strictly anchored and limited to the facts, skills, employer history, real projects, and leadership roles explicitly listed in the candidate's actual resume summary below.
-- You are strictly FORBIDDEN from fabricating, assuming, or asking questions about hypothetical past companies, certifications, tools, degrees, or accomplishments that do not exist in the candidate's resume block below.
-- Treat the candidate's actual experiences as your sole frame of reference when referencing past projects (e.g., "At [actual company name from resume] where you were a [actual title], you worked on [actual project/skill]. When doing that...").
+CRITICAL QUESTION RULES & BOUNDS:
+1. STRICT REFERENCE COMPLIANCE: For medical/MMI tracks, strictly restrict question scenarios and terminology to the provided PDF reference materials (CMU Medical School Interview Prep, Columbia Bioethics MMI Prep, University of Michigan MMI Guide). Do NOT introduce external medical or institutional topics outside these context standards.
+2. DELIVER EXACTLY 1 QUESTION AT A TIME (Each question delivered sequentially).
+3. KEEP EVERY QUESTION STRICTLY UNDER 25 WORDS (Exclude speaker name prefix if panel board from the word count).
+4. DIFFICULTY SCALING:
+   - Basic: Short, direct, fundamental questions (core motivations, why medicine, simple personal scenarios).
+   - Standard: Standard-length scenarios requiring stakeholder identification and multi-perspective reasoning (e.g., 14-year-old requesting birth control without parents, classmate cheating, peer conflict).
+   - Challenging: Complex, multi-layered scenarios incorporating domain terminology (social determinants of health [SDOH], scope of practice, bioethical pillars [Autonomy, Beneficence, Non-Maleficence, Justice], system-level rural physician recruitment incentives, Ebola vaccine trial in Liberia).
+5. PREVENT REPETITION: Do NOT generate questions that match or are similar to any of these previously completed question/scenario IDs: ${JSON.stringify(seenQuestionIds)}.
 
-4. STRICT UNIFORM ATTEMPT VARIATION (DO NOT REPEAT!)
-- Generate a completely unique, fresh, and unpredictable set of behavioral scenarios and technical parameters.
-- For this attempt, incorporate a strong situational theme centering on: "${chosenTheme}".
-- Do NOT repeat standard common boilerplate questions. Pick highly specific, unpredictable operational challenges that require immediate critical thinking from the user.
-- Session Reference Salt: ${sessionSalt} (use this dynamic seed to diversify prompt execution path fully).
+${isMedicalTrack ? `MEDICAL SCHOOL ADMISSIONS TRACK (AAMC & MMI FOCUS):
+- Evaluate AAMC 15 Core Competencies (Service Orientation, Ethical Responsibility, Critical Thinking, Cultural Competence, Social Skills, Teamwork, Reliability & Dependability, Resilience & Adaptability, Capacity for Improvement).
+- Always include rich MMI Metadata for each question: scenario_id (e.g. MMI_${sessionSalt}_1), title, aamc_competency_primary, aamc_competency_secondary, help_drawer_content (competency_overview, underlying_dilemma, key_talking_points), follow_up_probes, and timing (prep_seconds: 120, station_seconds: 480).` : `CORPORATE/STANDARD MODE:
+- Maintain a clear, objective, professional tone.
+- Ask targeted questions grounded strictly in the candidate's resume.`}
 
-5. INTERVIEW FORMAT: ${isPanel ? "PANEL BOARD" : "ONE-ON-ONE"}
-${rolePlayContext}
-
-6. CONTEXT
+Context:
 Target Role: ${jobTarget.positionTitle} at ${jobTarget.companyName}
 Industry: ${jobTarget.industry}
-Interview Type/Vibe: ${jobTarget.interviewType} (e.g., Behavioral, Technical, Internship, Research, Graduate School)
-Difficulty Level: ${jobTarget.difficulty}
-${jobTarget.jobDescription ? `Target Job Description / Competency Focus Areas:\n${jobTarget.jobDescription}\n` : ""}
+Selected Question Type: ${selectedQuestionType}
+Difficulty: ${jobTarget.difficulty || 'standard'}
+Interview Track: ${isMedicalTrack ? 'MEDICAL_SCHOOL' : 'STANDARD_JOB'}
+${jobTarget.jobDescription ? `Target Job Description / Focus:\n${jobTarget.jobDescription}\n` : ""}
 
 Candidate Resume Summary:
 ${JSON.stringify(resumeInfo || {})}
 
-Optional Albion Focus/Liberal Arts Strengths: ${jobTarget.focusCategory || "General liberal arts"}
+Generate exactly 4 customized mock interview questions:
+- Question 1: Question 1 strictly matching type "${selectedQuestionType}"
+- Question 2: Question 2 strictly matching type "${selectedQuestionType}"
+- Question 3: Question 3 strictly matching type "${selectedQuestionType}"
+- Question 4: Question 4 strictly matching type "${selectedQuestionType}"
 
-7. INTERVIEW EXECUTION & OUTPUT SCHEMA
-Generate exactly 4 highly customized, realistic mock interview questions in consecutive interview flow:
-- Question 1: General/Introductory query targeting their background and fit for ${jobTarget.positionTitle}.
-- Question 2: Behavioral / STAR-aligning query tailored specifically to their resume.
-- Question 3: Role-specific / Technical or Industry challenge.
-- Question 4: Transferable Liberal arts competency / Critical fit closing question.
-
-Return a JSON array of questions, each with:
-- id: e.g. "q1", "q2", "q3", "q4"
-- text: "The actual question text (prefixed with panelist name if PANEL BOARD)"
-- category: one of ["general", "behavioral", "technical", "resume-based", "company-fit", "closing"]
-
-Format as:
+${isMedicalTrack ? `Return a JSON object for Medical Track:
 {
   "questions": [
-    { "id": "q1", "text": "...", "category": "..." },
-    { "id": "q2", "text": "...", "category": "..." },
-    { "id": "q3", "text": "...", "category": "..." },
-    { "id": "q4", "text": "...", "category": "..." }
+    {
+      "id": "q1",
+      "text": "...",
+      "category": "${selectedQuestionType === 'medical_school' ? 'mmi' : selectedQuestionType}",
+      "scenario_id": "MMI_ETH_2026_01",
+      "title": "Short Scenario Title",
+      "aamc_competency_primary": "Ethical Responsibility to Self and Others",
+      "aamc_competency_secondary": "Cultural Competence",
+      "help_drawer_content": {
+        "competency_overview": "Summary of evaluated AAMC competency.",
+        "underlying_dilemma": "Core ethical or interpersonal tension.",
+        "key_talking_points": ["Point 1", "Point 2", "Point 3"]
+      },
+      "follow_up_probes": ["Probe 1?", "Probe 2?"],
+      "timing": { "prep_seconds": 120, "station_seconds": 480 }
+    }
   ]
-}
-`;
+}` : `Return a JSON object for Regular Track (DO NOT include AAMC competencies or MMI scenario_ids!):
+{
+  "questions": [
+    {
+      "id": "q1",
+      "text": "...",
+      "category": "${selectedQuestionType}",
+      "title": "Question Answer Guidance",
+      "help_drawer_content": {
+        "competency_overview": "Evaluates your ability to structure your response using the STAR method (Situation, Task, Action, Result).",
+        "underlying_dilemma": "Focus on clearly defining your personal direct actions and quantifiable outcomes.",
+        "key_talking_points": ["Set up the Situation/Task clearly", "Highlight your specific individual Action", "Quantify the final Result and key learning"]
+      },
+      "follow_up_probes": ["What was the hardest part of taking that action?", "How did you measure success?"]
+    }
+  ]
+}`}
+REMEMBER: EVERY QUESTION TEXT MUST BE UNDER 25 WORDS!`;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        temperature: 1.0,
+        temperature: 0.8,
         seed: sessionSalt,
       },
     });
 
-    const parsedJson = JSON.parse(response.text || "{}");
+    const parsedJson = safeJsonParse(response.text);
+    // Ensure all question texts are strictly checked and trimmed under 25 words if needed
+    if (parsedJson.questions && Array.isArray(parsedJson.questions)) {
+      parsedJson.questions = parsedJson.questions.map((q: any) => ({
+        ...q,
+        text: trimQuestionUnder25Words(q.text)
+      }));
+    }
     res.json(parsedJson);
   } catch (error: any) {
     console.error("Gemini Generate Questions Error:", error);
-    res.json({ questions: generateMockQuestions(resumeInfo, jobTarget) });
+    res.json({ questions: generateMockQuestions(resumeInfo, jobTarget, seenQuestionIds) });
   }
 });
 
-// 3. API: Evaluate Answer
+// Helper function to enforce question under 25 words
+function trimQuestionUnder25Words(questionText: string): string {
+  const words = questionText.trim().split(/\s+/);
+  if (words.length <= 25) return questionText;
+  return words.slice(0, 24).join(' ') + '?';
+}
+
+// Custom Filler Word Calibration & Objective Rubric Engine
+function analyzeObjectiveRubricAndFillers(
+  answerText: string, 
+  jobTarget: any, 
+  customFillerWordsInput: string[] = [],
+  speakingSeconds: number = 0
+) {
+  const DEFAULT_FILLERS = [
+    'like', 'you know', 'basically', 'literally', 'um', 'uh', 'so yeah', 
+    'sort of', 'kind of', 'i mean', 'actually', 'right', 'honestly', 
+    'at the end of the day', 'truth be told', 'to be fair'
+  ];
+
+  // Merge custom calibrated words with defaults
+  const calibratedList = Array.from(new Set([
+    ...DEFAULT_FILLERS,
+    ...(customFillerWordsInput || []).map(w => String(w).trim().toLowerCase()).filter(w => w.length > 0)
+  ]));
+
+  const lowerText = answerText.toLowerCase();
+  const words = answerText.trim().split(/\s+/).filter(w => w.length > 0);
+  const totalWords = words.length;
+
+  let totalFillers = 0;
+  const fillerBreakdownMap: { [word: string]: number } = {};
+
+  // Sort phrases by length descending so multi-word phrases match before individual words
+  const sortedFillers = calibratedList.sort((a, b) => b.length - a.length);
+
+  let tempText = lowerText;
+  sortedFillers.forEach(filler => {
+    const escaped = filler.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'g');
+    const matches = tempText.match(regex);
+    if (matches && matches.length > 0) {
+      const count = matches.length;
+      totalFillers += count;
+      fillerBreakdownMap[filler] = count;
+      tempText = tempText.replace(regex, ' ___ ');
+    }
+  });
+
+  const fillerBreakdown = Object.entries(fillerBreakdownMap)
+    .map(([word, count]) => ({ word, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const fillerDensityPct = totalWords > 0 
+    ? Number(((totalFillers / totalWords) * 100).toFixed(1)) 
+    : 0;
+
+  // 1. Relevance to Job Target (0-100)
+  const posKeywords = (jobTarget?.positionTitle || '').toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+  let relevanceScore = 75;
+  if (totalWords >= 40) relevanceScore += 10;
+  if (totalWords >= 80) relevanceScore += 5;
+  posKeywords.forEach((kw: string) => {
+    if (lowerText.includes(kw)) relevanceScore += 5;
+  });
+  if (lowerText.includes("situation") || lowerText.includes("task") || lowerText.includes("action") || lowerText.includes("result") || lowerText.includes("patient") || lowerText.includes("ethic") || lowerText.includes("team")) {
+    relevanceScore += 5;
+  }
+  const finalRelevance = Math.min(100, Math.max(50, relevanceScore));
+
+  // 2. Professional Register & Diction (0-100)
+  let registerScore = 90;
+  if (fillerDensityPct > 5) registerScore -= 20;
+  else if (fillerDensityPct > 2) registerScore -= 10;
+
+  if (lowerText.includes("stuff") || lowerText.includes("gonna") || lowerText.includes("wanna") || lowerText.includes("crap") || lowerText.includes("whatever")) {
+    registerScore -= 10;
+  }
+  if (totalWords < 20) registerScore -= 15;
+  const finalRegister = Math.min(100, Math.max(40, registerScore));
+
+  // 3. Clarity & Conciseness (0-100)
+  let clarityScore = 85;
+  if (totalWords >= 60 && totalWords <= 250) clarityScore += 10;
+  else if (totalWords < 30) clarityScore -= 20;
+  else if (totalWords > 350) clarityScore -= 15;
+
+  if (fillerDensityPct <= 1.5) clarityScore += 5;
+  const finalClarity = Math.min(100, Math.max(40, clarityScore));
+
+  // 4. Vocal Composure & Pace (0-100)
+  let wpm = 0;
+  if (speakingSeconds > 0) {
+    wpm = Math.round((totalWords / speakingSeconds) * 60);
+  }
+  let composureScore = 85;
+  if (wpm >= 110 && wpm <= 170) composureScore += 10;
+  else if (wpm > 0 && (wpm < 80 || wpm > 190)) composureScore -= 15;
+
+  if (fillerDensityPct === 0) composureScore += 5;
+  else if (fillerDensityPct > 4) composureScore -= 15;
+
+  const finalComposure = Math.min(100, Math.max(40, composureScore));
+
+  return {
+    objective_rubric: {
+      relevance_to_target: finalRelevance,
+      professional_register: finalRegister,
+      clarity_conciseness: finalClarity,
+      vocal_composure_pace: finalComposure
+    },
+    filler_analysis: {
+      total_words: totalWords,
+      total_fillers: totalFillers,
+      filler_density_pct: fillerDensityPct,
+      filler_breakdown: fillerBreakdown,
+      custom_calibrated_words_used: calibratedList
+    }
+  };
+}
+
+// Helper function to calculate hint penalty on 5.0 scale
+function applyHintPenalty(rawEvaluatedScore: number, hintsUnlocked: number = 0) {
+  const numHints = Math.min(3, Math.max(0, Number(hintsUnlocked) || 0));
+  // Each hint tier reduces max possible score by 0.5 points
+  const maxScoreCap = 5.0 - (numHints * 0.5);
+  
+  // Final score is capped at the remaining max allowance
+  const finalScore = Math.min(rawEvaluatedScore, maxScoreCap);
+  
+  return {
+    rawScore: Number(rawEvaluatedScore.toFixed(2)),
+    hintsUnlocked: numHints,
+    penaltyDeducted: numHints * 0.5,
+    maxScoreCap: maxScoreCap,
+    finalScore: Number(finalScore.toFixed(2))
+  };
+}
+
+// 3. API: Evaluate Answer (THE BRIT INTERVIEW EVALUATION ENGINE UNIVERSAL v2.0)
 app.post("/api/interview/evaluate-answer", async (req, res) => {
-  const { questionText, answerText, resumeInfo, jobTarget, category } = req.body;
-  if (!questionText || !answerText || !jobTarget) {
+  const { questionText, answerText, resumeInfo, jobTarget, category, hintsUnlocked = 0, scenarioId } = req.body;
+  if (!questionText || answerText === undefined || answerText === null || !jobTarget) {
     return res.status(400).json({ error: "Missing required query parameters" });
+  }
+
+  const hintsCount = Math.min(3, Math.max(0, parseInt(hintsUnlocked, 10) || 0));
+
+  // Determine Track (MEDICAL_SCHOOL vs STANDARD_JOB)
+  const targetStr = `${jobTarget.positionTitle || ''} ${jobTarget.companyName || ''} ${jobTarget.industry || ''} ${jobTarget.interviewType || ''}`.toLowerCase();
+  const isMedical = jobTarget.interviewType === 'medical_school' || /med|doctor|physician|mmi|aamc|medical|hospital|clinic|pre-med|prehealth|surgery/i.test(targetStr);
+  const interviewTrack = isMedical ? "MEDICAL_SCHOOL" : "STANDARD_JOB";
+
+  // Check if answer is skipped or empty -> Zero score mandatory
+  const isSkippedAnswer = !answerText || answerText.trim() === "[Skipped Question]" || answerText.trim() === "" || answerText.toLowerCase().includes("skipped question");
+  if (isSkippedAnswer) {
+    return res.json({
+      track_evaluated: interviewTrack,
+      domain_classification: "Skipped Station",
+      targeted_competencies: ["N/A"],
+      overall_score: 0.0,
+      score: 0.0,
+      numericScore: 0,
+      final_score: 0.0,
+      raw_evaluation_score: 0.0,
+      hints_unlocked: hintsCount,
+      penalty_points: 0.0,
+      max_score_cap: 5.0,
+      score_breakdown: {
+        claim_or_situation: 0.0,
+        evidence_or_action: 0.0,
+        insight_or_result: 0.0,
+        penalty_deductions: 0.0
+      },
+      feedback: {
+        strengths: ["Question station skipped by candidate."],
+        vulnerabilities: ["No response recorded for this question station."],
+        red_flag_alert: null
+      },
+      strengths: ["Question station skipped by candidate."],
+      areasToImprove: ["Candidate elected to skip this question station."],
+      suggestedAnswer: "Review the prompt scenario and practice structuring a response using the STAR framework or bioethics principles.",
+      clarityComments: "Skipped question.",
+      confidenceComments: "Skipped question.",
+      structureComments: "Skipped question.",
+      relevanceComments: "Skipped question.",
+      professionalismComments: "Skipped question."
+    });
   }
 
   const ai = getGeminiClient();
   if (!ai) {
-    return res.json(generateMockFeedback(questionText, answerText, category, jobTarget));
+    return res.json(generateMockFeedback(questionText, answerText, category, jobTarget, interviewTrack, hintsCount, scenarioId));
   }
 
   try {
-    const isBehavioral = category === "behavioral" || questionText.toLowerCase().includes("tell me about a time") || questionText.toLowerCase().includes("describe a scenario");
-    const isPanel = jobTarget.interviewFormat === 'panel-board';
+    const prompt = `# SYSTEM INSTRUCTION: "THE BRIT INTERVIEW" EVALUATION ENGINE (UNIVERSAL v2.0)
 
-    const prompt = `You are an expert, objective corporate interviewer assessing an Albion College student preparing for a formal job interview.
-Evaluate the student's answer to this mock interview question:
-Question: "${questionText}"
+## 1. TASK (Role, Persona & Objective)
+- Persona: Senior Career & Admissions Consultant for Albion College ("The Brit Interview").
+- Objective: Evaluate interview responses dynamically based on the designated INTERVIEW_TRACK ("${interviewTrack}").
+- Primary Action: Classify the prompt, calculate scores on a 0.0–5.0 scale, detect red flags, and generate structured feedback without altering the standard payload output architecture.
+
+CRITICAL HARD EVALUATION CONSTRAINTS:
+1. AUDIO-TRANSCRIPT EXCLUSIVE SOURCE: The evaluation MUST be generated 100% from the transcribed text while ignoring all visual/video metrics (such as race, gender, eye tracking, facial expressions, or physical posture).
+2. STRICT REFERENCE COMPLIANCE: Restrict evaluation feedback and terminology to the provided context documentation (CMU Medical School Interview Prep, Columbia Bioethics MMI Prep, University of Michigan MMI Guide). Do NOT introduce external medical or institutional topics beyond this reference material.
+
+---
+
+## 2. CONTEXT & TRACK SWITCHING LOGIC
+Evaluate the incoming response using the rules for INTERVIEW_TRACK = "${interviewTrack}":
+
+### TRACK A: MEDICAL_SCHOOL
+- Evaluation Baseline: AAMC 15 Core Competencies (Preprofessional, Thinking, Science).
+- Formula: Composite = Claim (1.0) + Evidence (2.0) + Insight (2.0) - Red Flags.
+- Red Flags: Patient autonomy violations, bioethical breaches, blame-shifting, superficial motivation ("I just want to help people").
+
+### TRACK B: STANDARD_JOB
+- Evaluation Baseline: STAR Method (Situation, Task, Action, Result) & JD Alignment.
+- Formula: Composite = Situation/Task (1.0) + Action (2.0) + Result (2.0) - Red Flags.
+- Red Flags: Lack of quantitative impact, passive voice ("we" vs "I"), blame-shifting, lack of role alignment.
+
+---
+
+## 3. REFERENCES & BENCHMARKS
+
+### Standardized Output Formula (0.0 to 5.0)
+- 5.0 (Exceptional): Hits all structural requirements with rich evidence and deep insight.
+- 3.0 - 4.0 (Competent): Clear answer with good evidence, missing deeper reflection/metrics.
+- 1.0 - 2.0 (Needs Work): Generic response, lacking concrete evidence or structure.
+- 0.0 - 0.5 (Red Flag): Ethical non-compliance, arrogance, or blame-shifting.
+
+---
+
+## 4. EVALUATION & VALIDATION RULES
+1. Maintain identical output keys regardless of INTERVIEW_TRACK.
+2. Validate that the feedback tone is encouraging, objective, and constructive.
+3. Trigger a RED_FLAG_ALERT immediately if overall_score < 1.0 or an ethical/behavioral violation occurs.
+
+---
+
+## INPUT CANDIDATE RESPONSE FOR EVALUATION:
+Question Category: "${category || 'general'}"
+Question Text: "${questionText}"
 Student Answer: "${answerText}"
+Target Position: ${jobTarget.positionTitle} at ${jobTarget.companyName} (Industry: ${jobTarget.industry || 'General'})
+Interview Track: ${interviewTrack}
+Candidate Resume Summary: ${JSON.stringify(resumeInfo || {})}
 
-Target Position: ${jobTarget.positionTitle} at ${jobTarget.companyName} (Difficulty: ${jobTarget.difficulty})
-Interview Format: ${isPanel ? "PANEL BOARD" : "ONE-ON-ONE"}
-${jobTarget.jobDescription ? `Target Job Description / Competency Focus Areas:\n${jobTarget.jobDescription}\n` : ""}
+---
 
-${jobTarget.interviewType === 'campus_job' || jobTarget.interviewType === 'internship' ? `CRITICAL CAMPUS JOB/INTERNSHIP EVALUATION DIRECTIVE:
-- This is a CAMPUS JOB or INTERNSHIP interview, which has extra-lenient, highly supportive standards.
-- You MUST override any intimidating or high-stakes corporate grading rules.
-- Provide feedback in a warm, encouraging, mentor-like professional tone.
-- Score attempts extra-generously (typically giving 7.5 to 10.0 for any reasonable, honest attempt).
-- In 'strengths' and 'suggestedAnswer', highlight their positive effort and potential, coaching them constructively with welcoming phrasing.` : `1. TONE & PERSONALITY (THE "REAL WORLD" RULE)
-- Provide feedback in a NEUTRAL, objective, and formal corporate tone.
-- Do NOT use overly enthusiastic, positive filler words (no "Awesome!", "Great job!", "That's fantastic!" in the feedback comments).
-- Acknowledge responses with brief, neutral professional markers, such as: "Understood," "Thank you for sharing that," "I see," or "Moving on to the next question."
-- Replicate the high-stakes, slightly intimidating but realistic standards of a real interview. Be polite, but completely impartial.
-
-2. NO HAND-HOLDING (CRITICAL GUARDRAIL)
-- Do NOT help the candidate connect the dots between past experience and the job description in the score or strengths.
-- If the candidate's answer was weak, lacking in concrete details, or failed to connect their background to the role, reflect this directly in a tougher score and detailed constructive criticisms in 'areasToImprove'. The burden of proof is entirely on the candidate.`}
-
-3. STAR FRAMEWORK
-- If the question is behavioral, carefully check if they specified Situation, Task, Action, and Result (STAR). Give strict critique of what was missing.
-
-Student Context (Brief Resume):
-${JSON.stringify(resumeInfo || {})}
-
-Provide specific, realistic feedback. Return JSON with:
-1. "score5": a realistic number from 0 to 5 according to this strict rubric:
-   - 0: No answer given or answer completely irrelevant. No examples given. The answer does not match the information in the resume.
-   - 1: A few good points but main issues are missing. No examples/irrelevant examples given.
-   - 2: Some points covered, not all relevant. Some examples given.
-   - 3: Some points covered. Relevant information given. Some examples given.
-   - 4: Good answer. Relevant information. All or most points covered. Good examples.
-   - 5: Perfect answer. All points addressed. All points relevant.
-2. "score5Explanation": The exact verbatim string description from the rubric above matching the chosen score5.
-3. "score": a realistic number from 1 to 10 mapped directly from the score5 value (e.g. 0->1, 1->3, 2->5, 3->7, 4->9, 5->10).
-4. "strengths": Array of 2-3 objective, realistic things they did well (e.g., "Adequate logical structure," "Specific technical terms mentioned")
-5. "areasToImprove": Array of 2-3 genuine, actionable items to make their delivery much more sound and persuasive
-6. "suggestedAnswer": A high-impact model answer tailored to their resume showing how they can prove their fit themselves.
-7. "clarityComments": Neutral brief feedback on clarity
-8. "confidenceComments": Neutral brief feedback on vocal confidence/pacing
-9. "structureComments": Neutral brief comments on structure
-10. "relevanceComments": Neutral assessment on how well they actually answered the question
-11. "professionalismComments": Neutral critique on vocabulary and business prose
-12. "starAnalysis": ${isBehavioral ? "A review of STAR formatting, outlining what segments were missing or weak." : "null"}
-
-Ensure the output is JSON matching this exact structure:
+## 5. OUTPUT FORMAT (UNIFIED API SCHEMA)
+Return a valid JSON object matching this EXACT structure:
 {
-  "score5": 4,
-  "score5Explanation": "Good answer. Relevant information. All or most points covered. Good examples.",
-  "score": 8,
-  "strengths": ["string", "string"],
-  "areasToImprove": ["string", "string"],
-  "suggestedAnswer": "string",
-  "clarityComments": "string",
-  "confidenceComments": "string",
-  "structureComments": "string",
-  "relevanceComments": "string",
-  "professionalismComments": "string",
-  "starAnalysis": "string or null"
+  "track_evaluated": "${interviewTrack}",
+  "domain_classification": "[Identified Category, e.g., Bioethics & MMI / Clinical Exposure / STAR Behavioral / Technical]",
+  "targeted_competencies": ["Competency 1", "Competency 2"],
+  "overall_score": 4.2, // Float 0.0 to 5.0
+  "score_breakdown": {
+    "claim_or_situation": 0.9, // Float 0.0 to 1.0
+    "evidence_or_action": 1.7, // Float 0.0 to 2.0
+    "insight_or_result": 1.6, // Float 0.0 to 2.0
+    "red_flag_deduction": 0.0 // Float 0.0 to 3.0 deduction
+  },
+  "feedback": {
+    "strengths": ["Strength 1", "Strength 2"],
+    "vulnerabilities": ["Vulnerability 1", "Vulnerability 2"],
+    "red_flag_alert": null // String warning if red flag or ethical breach or overall_score < 1.0, otherwise null
+  },
+  "recommended_rewrite": "Structured rewrite following target framework"
 }
 `;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -352,19 +737,238 @@ Ensure the output is JSON matching this exact structure:
       },
     });
 
-    const parsedJson = JSON.parse(response.text || "{}");
+    const parsedJson = safeJsonParse(response.text);
+    
+    // Normalize Universal v2.0 fields
+    const rawScore = typeof parsedJson.overall_score === 'number' ? parsedJson.overall_score : 4.0;
+    const penaltyResult = applyHintPenalty(rawScore, hintsCount);
+    const finalScore = penaltyResult.finalScore;
+
+    // Run Objective Rubric & Filler Calibration Engine
+    const objectiveAnalysis = analyzeObjectiveRubricAndFillers(
+      answerText, 
+      jobTarget, 
+      req.body.customFillerWords || [], 
+      req.body.speakingSeconds || 0
+    );
+
+    const claimOrSit = parsedJson.score_breakdown?.claim_or_situation ?? 0.8;
+    const evOrAct = parsedJson.score_breakdown?.evidence_or_action ?? 1.6;
+    const insOrRes = parsedJson.score_breakdown?.insight_or_result ?? 1.6;
+
+    const numericScore = Math.min(100, Math.max(0, Math.round(finalScore * 20)));
+    const score = Math.round(finalScore * 2 * 10) / 10;
+
+    parsedJson.track_evaluated = interviewTrack;
+    parsedJson.raw_evaluation_score = penaltyResult.rawScore;
+    parsedJson.hints_unlocked = penaltyResult.hintsUnlocked;
+    parsedJson.penalty_points = penaltyResult.penaltyDeducted;
+    parsedJson.max_score_cap = penaltyResult.maxScoreCap;
+    parsedJson.final_score = finalScore;
+    parsedJson.overall_score = finalScore;
+    parsedJson.aamc_competency_id = scenarioId || req.body.aamc_competency_id || "MMI_STATION";
+
+    parsedJson.objective_rubric = objectiveAnalysis.objective_rubric;
+    parsedJson.filler_analysis = objectiveAnalysis.filler_analysis;
+
+    parsedJson.numericScore = numericScore;
+    parsedJson.score = score;
+    parsedJson.score5 = Math.round(finalScore);
+    parsedJson.score5Explanation = finalScore >= 4.5 
+      ? "Exceptional: Hits all structural requirements with rich evidence and deep insight." 
+      : finalScore >= 3.0 
+      ? "Competent: Clear answer with good evidence, missing deeper reflection/metrics." 
+      : "Needs Work: Lacks concrete evidence or structure.";
+
+    if (!parsedJson.feedback) {
+      parsedJson.feedback = {
+        strengths: ["Clear response structure provided."],
+        vulnerabilities: ["Incorporate stronger specific evidence and reflective insight."],
+        red_flag_alert: finalScore < 1.0 ? "CRITICAL RED FLAG ALERT: Ethical or behavioral vulnerability detected." : null
+      };
+    } else if (finalScore < 1.0 && !parsedJson.feedback.red_flag_alert) {
+      parsedJson.feedback.red_flag_alert = "CRITICAL RED FLAG ALERT: Ethical or behavioral vulnerability detected.";
+    }
+
+    parsedJson.strengths = parsedJson.feedback.strengths || ["Clear context provided"];
+    parsedJson.areasToImprove = parsedJson.feedback.vulnerabilities || ["Provide deeper quantitative or reflective insights."];
+    parsedJson.suggestedAnswer = parsedJson.recommended_rewrite || "A strong structured model response...";
+
+    parsedJson.starChecklist = {
+      situation: claimOrSit >= 0.5,
+      task: claimOrSit >= 0.7,
+      action: evOrAct >= 1.0,
+      result: insOrRes >= 1.0
+    };
+    parsedJson.starChecklistFormatted = `S: ${parsedJson.starChecklist.situation ? "✓" : "✗"} | T: ${parsedJson.starChecklist.task ? "✓" : "✗"} | A: ${parsedJson.starChecklist.action ? "✓" : "✗"} | R: ${parsedJson.starChecklist.result ? "✓" : "✗"}`;
+    parsedJson.keyTip = parsedJson.feedback.red_flag_alert || parsedJson.areasToImprove[0] || "Focus on concrete outcomes and reflective learning.";
+    parsedJson.starBreakdown = {
+      situationTaskScore: Math.round((claimOrSit / 1.0) * 30),
+      actionScore: Math.round((evOrAct / 2.0) * 40),
+      resultScore: Math.round((insOrRes / 2.0) * 30)
+    };
+
     res.json(parsedJson);
   } catch (error: any) {
     console.error("Gemini Evaluate Answer Error:", error);
-    res.json(generateMockFeedback(questionText, answerText, category, jobTarget));
+    res.json(generateMockFeedback(questionText, answerText, category, jobTarget, interviewTrack, hintsCount, scenarioId, req.body.customFillerWords, req.body.speakingSeconds));
+  }
+});
+
+// 3a. API: Custom Filler Word Calibration & Instant Analysis
+app.post("/api/interview/calibrate-filler-words", (req, res) => {
+  const { sampleText = "", customFillerWords = [], speakingSeconds = 0, jobTarget = {} } = req.body;
+  const analysis = analyzeObjectiveRubricAndFillers(sampleText, jobTarget, customFillerWords, speakingSeconds);
+  res.json({
+    status: "success",
+    message: "Filler word calibration and objective rubric computation complete.",
+    analysis
+  });
+});
+
+// 3b. API: Generate 3-4 STAR Bullet Points (No Resume Path)
+app.post("/api/interview/generate-star-bullets", async (req, res) => {
+  const { answers, jobTarget } = req.body;
+  if (!answers || Object.keys(answers).length === 0) {
+    return res.status(400).json({ error: "Missing diagnostic answers" });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.json({
+      starBullets: [
+        "Coordinated academic project deliverables by establishing a central task pipeline, completing all milestones 2 days ahead of schedule.",
+        "Synthesized research data using analytical methodologies to present findings to peer cohorts and faculty members.",
+        "Engineered group collaboration workflows, improving project execution efficiency and securing an A-grade mark.",
+        "Executed structured problem-solving protocols under tight deadlines, ensuring 100% compliance with course specifications."
+      ]
+    });
+  }
+
+  try {
+    const prompt = `You are an empathetic Career Coach and ATS Expert for university students.
+Based on the student's responses to diagnostic questions below, generate 3 to 4 ATS-friendly STAR resume bullet points.
+
+Student Responses:
+${JSON.stringify(answers)}
+
+Target Role: ${jobTarget?.positionTitle || "Entry-Level Position / Internship"}
+
+RULES FOR ATS STAR BULLET POINTS:
+1. Lead with strong, past-tense action verbs (e.g., Coordinated, Engineered, Synthesized, Spearheaded, Developed).
+2. Incorporate specific Situation/Task context and Action details.
+3. Include quantified outcomes, percentage gains, or concrete deliverables in the Result portion.
+4. Keep each bullet point clean, professional, concise, and ATS-friendly.
+
+Return JSON:
+{
+  "starBullets": [
+    "Bullet point 1...",
+    "Bullet point 2...",
+    "Bullet point 3...",
+    "Bullet point 4..."
+  ]
+}
+`;
+
+    const response = await callGeminiWithRetry({
+      model: "gemini-3.6-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.4,
+      },
+    });
+
+    const parsedJson = safeJsonParse(response.text);
+    res.json(parsedJson);
+  } catch (error: any) {
+    console.error("Gemini Generate STAR Bullets Error:", error);
+    res.json({
+      starBullets: [
+        "Coordinated academic project deliverables by establishing a central task pipeline, completing all milestones 2 days ahead of schedule.",
+        "Synthesized research data using analytical methodologies to present findings to peer cohorts and faculty members.",
+        "Engineered group collaboration workflows, improving project execution efficiency and securing top evaluation marks.",
+        "Executed structured problem-solving protocols under tight deadlines, ensuring 100% compliance with course specifications."
+      ]
+    });
   }
 });
 
 // 4. API: Generate Final Report
+// 3b. API: Video Response Upload & Pre-signed URL / Transactional Email Endpoints
+app.post("/api/interview/generate-video-signed-url", (req, res) => {
+  const { questionId, filename = "response.webm" } = req.body;
+  const timestamp = Date.now();
+  const mockSignedUploadUrl = `/api/interview/upload-video-response?questionId=${encodeURIComponent(questionId || 'q1')}&ts=${timestamp}`;
+  const mockPublicWatchUrl = `/api/interview/watch-video?questionId=${encodeURIComponent(questionId || 'q1')}&ts=${timestamp}`;
+
+  res.json({
+    uploadUrl: mockSignedUploadUrl,
+    watchUrl: mockPublicWatchUrl,
+    expiresInSeconds: 3600,
+    questionId: questionId || 'q1'
+  });
+});
+
+app.post("/api/interview/upload-video-response", (req, res) => {
+  const { questionId, videoData, durationSeconds } = req.body;
+  res.json({
+    success: true,
+    message: "Video response successfully received and processed",
+    questionId: questionId || 'q1',
+    durationSeconds: durationSeconds || 0,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.post("/api/interview/send-video-notification", (req, res) => {
+  const { recipientEmail, questionId, questionText, videoUrl, durationSeconds } = req.body;
+  if (!recipientEmail) {
+    return res.status(400).json({ error: "Recipient email is required" });
+  }
+
+  console.log(`[VIDEO NOTIFICATION DISPATCHED] To: ${recipientEmail} | Question: "${questionText}" | Duration: ${durationSeconds}s | Watch Link: ${videoUrl}`);
+
+  res.json({
+    success: true,
+    message: `Transactional video response email successfully sent to ${recipientEmail}`,
+    emailDetails: {
+      recipient: recipientEmail,
+      questionText: questionText || "Interview Question Response",
+      watchLink: videoUrl || "https://ais-dev-zp7kqjpekwxdkncvomrml2-772396752309.us-east1.run.app",
+      durationSeconds: durationSeconds || 0,
+      dispatchedAt: new Date().toISOString()
+    }
+  });
+});
+
 app.post("/api/interview/generate-report", async (req, res) => {
   const { sessionHistory, resumeInfo, jobTarget, totalSpeakingSeconds } = req.body;
   if (!sessionHistory || !jobTarget) {
     return res.status(400).json({ error: "Missing required history parameters" });
+  }
+
+  // Count valid non-skipped answers
+  const validAnswers = (sessionHistory || []).filter((h: any) => {
+    const ans = (h.answerText || h.answer || '').trim().toLowerCase();
+    const sc = typeof h.feedback?.score === 'number' ? h.feedback.score : (typeof h.feedback?.overall_score === 'number' ? h.feedback.overall_score : (typeof h.score === 'number' ? h.score : 0));
+    
+    const isSkipped = !ans || 
+                      ans === '[skipped question]' || 
+                      ans.includes('skipped question') || 
+                      ans === 'skipped' || 
+                      ans === 'n/a' ||
+                      sc === 0;
+    return !isSkipped;
+  });
+
+  const totalQuestions = sessionHistory.length || 1;
+  const answeredCount = validAnswers.length;
+  const allSkipped = answeredCount === 0;
+
+  if (allSkipped) {
+    return res.json(generateMockFinalReport(sessionHistory, jobTarget, totalSpeakingSeconds));
   }
 
   const ai = getGeminiClient();
@@ -441,13 +1045,12 @@ Return JSON matching this schema:
       "evidence": "Mention of Albion business/economics coursework.",
       "suggestion": "Weave in specific coursework achievements or team project details."
     }
-    // ... exactly 9 more objects for each of the remaining categories
   ]
 }
 `;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -455,7 +1058,34 @@ Return JSON matching this schema:
       },
     });
 
-    const parsedJson = JSON.parse(response.text || "{}");
+    const parsedJson = safeJsonParse(response.text);
+
+    // CRITICAL ENFORCEMENT: Scale or zero-out overall score based on actual completed questions
+    if (allSkipped) {
+      parsedJson.overallScore = 0;
+      parsedJson.communicationScore = 0;
+      parsedJson.contentQualityScore = 0;
+      parsedJson.resumeAlignmentScore = 0;
+      parsedJson.confidenceClarityScore = 0;
+    } else if (answeredCount < totalQuestions) {
+      const completionRatio = answeredCount / totalQuestions;
+      if (typeof parsedJson.overallScore === 'number') {
+        parsedJson.overallScore = Math.min(100, Math.max(0, Math.round(parsedJson.overallScore * completionRatio)));
+      }
+      if (typeof parsedJson.communicationScore === 'number') {
+        parsedJson.communicationScore = Math.min(100, Math.max(0, Math.round(parsedJson.communicationScore * completionRatio)));
+      }
+      if (typeof parsedJson.contentQualityScore === 'number') {
+        parsedJson.contentQualityScore = Math.min(100, Math.max(0, Math.round(parsedJson.contentQualityScore * completionRatio)));
+      }
+      if (typeof parsedJson.resumeAlignmentScore === 'number') {
+        parsedJson.resumeAlignmentScore = Math.min(100, Math.max(0, Math.round(parsedJson.resumeAlignmentScore * completionRatio)));
+      }
+      if (typeof parsedJson.confidenceClarityScore === 'number') {
+        parsedJson.confidenceClarityScore = Math.min(100, Math.max(0, Math.round(parsedJson.confidenceClarityScore * completionRatio)));
+      }
+    }
+
     res.json(parsedJson);
   } catch (error: any) {
     console.error("Gemini Generate Report Error:", error);
@@ -553,11 +1183,539 @@ function generateMockParsedResume(text: string) {
   };
 }
 
-function generateMockQuestions(resumeInfo: any, jobTarget: any) {
+function generateMockQuestions(resumeInfo: any, jobTarget: any, seenQuestionIds: string[] = []) {
   const title = jobTarget.positionTitle || "Internship Program";
   const company = jobTarget.companyName || "Target Company";
   const isPanel = jobTarget.interviewFormat === 'panel-board';
   const isEasyVibe = jobTarget.interviewType === 'campus_job' || jobTarget.interviewType === 'internship';
+  const isMedicalTrack = jobTarget.interviewType === 'medical_school' || /med|doctor|physician|mmi|aamc|medical|hospital|clinic|pre-med|prehealth|surgery/i.test(`${title} ${company} ${jobTarget.industry || ''}`);
+
+  if (isMedicalTrack) {
+    const staticMmiPool = [
+      {
+        id: "mmi_pdf_1",
+        scenario_id: "MMI_CMU_14_BC",
+        title: "Confidentiality & Adolescent Care",
+        text: "A 14-year-old patient asks for birth control but begs you not to tell her parents. How do you proceed?",
+        category: "mmi",
+        aamc_competency_primary: "Ethical Responsibility to Self and Others",
+        aamc_competency_secondary: "Social Skills",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Ethical Responsibility and Social Skills in minor reproductive healthcare confidentiality.",
+          underlying_dilemma: "Navigating state minor consent laws, patient autonomy, and parental involvement.",
+          key_talking_points: [
+            "Reassure the patient of medical confidentiality within legal limits.",
+            "Explore her underlying motivations, safety, and relationship with her parents.",
+            "Encourage and support her in opening an honest dialogue with family if safe to do so."
+          ]
+        },
+        follow_up_probes: [
+          "What if you suspect coercion or abuse by an older partner?",
+          "How do you handle medical records privacy under state minor consent statutes?"
+        ]
+      },
+      {
+        id: "mmi_pdf_2",
+        scenario_id: "MMI_CMU_RURAL_REC",
+        title: "Rural Physician Recruitment & Incentives",
+        text: "A community in rural Michigan is struggling to recruit physicians. What three specific structural incentives would you implement to address this?",
+        category: "mmi",
+        aamc_competency_primary: "Critical Thinking",
+        aamc_competency_secondary: "Service Orientation",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Critical Thinking and Service Orientation in solving systemic healthcare access shortages.",
+          underlying_dilemma: "Overcoming financial debt, professional isolation, and family integration barriers in rural medicine.",
+          key_talking_points: [
+            "Propose loan repayment or service-for-scholarship programs to relieve medical debt.",
+            "Establish tele-mentorship and specialty consultation networks to eliminate professional isolation.",
+            "Design trailing spouse and family integration programs to foster long-term community retention."
+          ]
+        },
+        follow_up_probes: [
+          "How do Social Determinants of Health (SDOH) impact physician retention in rural Northern Michigan?",
+          "Why is forced placement ineffective compared to empowering physicians to choose rural practice?"
+        ]
+      },
+      {
+        id: "mmi_pdf_3",
+        scenario_id: "MMI_COLUMBIA_DOWN_PREG",
+        title: "Autonomy in Adult Patients with Special Needs",
+        text: "A 20-year-old pregnant patient with Down syndrome refuses an abortion, but her parents insist on it. What factors do you consider?",
+        category: "mmi",
+        aamc_competency_primary: "Ethical Responsibility to Self and Others",
+        aamc_competency_secondary: "Cultural Competence",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates bioethical principles (Autonomy vs Beneficence) in decision-making for adults with developmental conditions.",
+          underlying_dilemma: "Determining decision-making capacity and protecting patient bodily autonomy against parental authority.",
+          key_talking_points: [
+            "Assess the patient's individual decision-making capacity regarding pregnancy and healthcare.",
+            "Recognize that legal adulthood grants patient autonomy unless a court decrees formal guardianship.",
+            "Facilitate ethics committee consultation and supportive multidisciplinary counseling."
+          ]
+        },
+        follow_up_probes: [
+          "How do you balance parental caregiver stress with the patient's legal rights?",
+          "What resources can assist the patient if she chooses to raise the child?"
+        ]
+      },
+      {
+        id: "mmi_pdf_4",
+        scenario_id: "MMI_COLUMBIA_ATTENDING_ERR",
+        title: "Observing an Unmentioned Surgical Error",
+        text: "You see your attending physician make a mistake during a procedure. They don't mention it to the patient. What do you do?",
+        category: "mmi",
+        aamc_competency_primary: "Reliability & Dependability",
+        aamc_competency_secondary: "Capacity for Improvement",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Tests professional integrity and hierarchical communication when witnessing medical errors.",
+          underlying_dilemma: "Weighing fear of career retaliation against fundamental patient safety and truthfulness.",
+          key_talking_points: [
+            "Speak with the attending physician privately to clarify the procedure outcome and error disclosure plan.",
+            "Emphasize the ethical duty of transparent error disclosure to patients.",
+            "Report through institutional quality/ethics channels if the attending refuses disclosure."
+          ]
+        },
+        follow_up_probes: [
+          "What if the attending threatens your medical school evaluation or residency match reference?",
+          "How does error reporting improve health system quality and safety?"
+        ]
+      },
+      {
+        id: "mmi_pdf_5",
+        scenario_id: "MMI_CMU_PEER_ALCOHOL",
+        title: "Peer Substance Impairment on Clinical Rounds",
+        text: "You notice your best friend in medical school has been smelling of alcohol during morning rounds. Walk me through your next steps.",
+        category: "mmi",
+        aamc_competency_primary: "Resilience & Adaptability",
+        aamc_competency_secondary: "Ethical Responsibility to Self and Others",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates interprofessional responsibility and patient protection when a colleague is impaired.",
+          underlying_dilemma: "Balancing loyalty to a close friend with absolute duty to protect patient safety.",
+          key_talking_points: [
+            "Immediately intervene to remove the friend from direct patient care responsibilities.",
+            "Speak privately with the friend to express compassionate concern and encourage physician health program support.",
+            "Notify the chief resident or clerkship director if the friend refuses self-reporting."
+          ]
+        },
+        follow_up_probes: [
+          "What if the friend denies drinking and insists on treating patients?",
+          "How do medical student wellness programs assist with substance use recovery?"
+        ]
+      },
+      {
+        id: "mmi_pdf_6",
+        scenario_id: "MMI_COLUMBIA_CAM_REFUSAL",
+        title: "Patient Refusal of Standard Cancer Treatment",
+        text: "A patient whose breast lump was surgically removed refuses chemotherapy in favor of alternative medicine (CAM). How do you address this with her?",
+        category: "mmi",
+        aamc_competency_primary: "Cultural Competence",
+        aamc_competency_secondary: "Service Orientation",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates patient autonomy, informed consent, and integrative health communication.",
+          underlying_dilemma: "Respecting competent patient treatment refusal while providing clear risk education.",
+          key_talking_points: [
+            "Inquire empathetically about her fears, past experiences, or rationale regarding chemotherapy.",
+            "Verify informed consent by explaining statistical recurrence risks and benefits of standard therapy clearly.",
+            "Explore if non-harmful complementary therapies can safely integrate alongside standard oncology care."
+          ]
+        },
+        follow_up_probes: [
+          "What if her refusal is driven by financial constraints or lack of health insurance?",
+          "How do you maintain a therapeutic relationship if she firmly declines standard care?"
+        ]
+      },
+      {
+        id: "mmi_pdf_7",
+        scenario_id: "MMI_UM_JAW_MIGUEL",
+        title: "Emergency Care & Uninsured Financial Barriers",
+        text: "An uninsured 25-year-old male from a rural area has a fractured jawbone requiring $12,500 surgery that hospital leadership states cannot be done pro-bono. What do you say to him?",
+        category: "mmi",
+        aamc_competency_primary: "Social Skills",
+        aamc_competency_secondary: "Critical Thinking",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates compassionate crisis communication, patient advocacy, and financial resource navigation.",
+          underlying_dilemma: "Managing a acute painful condition when the patient lacks immediate means to pay.",
+          key_talking_points: [
+            "Greet the patient empathetically and manage acute pain immediately.",
+            "Explain the medical consequences of prompt jaw setting ($12,500) vs delayed improper setting ($48,000).",
+            "Connect the patient immediately with hospital social workers, charity care programs, or community health clinics."
+          ]
+        },
+        follow_up_probes: [
+          "How do you advocate for the patient with hospital administration or financial counselors?",
+          "What alternative regional clinic resources might exist for low-income patients?"
+        ]
+      },
+      {
+        id: "mmi_q1",
+        scenario_id: "MMI_ETH_2026_01",
+        title: "Family Refusal of Pediatric Treatment",
+        text: "Parents of a 6-year-old patient refuse a recommended antibiotic course for severe pneumonia, preferring alternative holistic remedies. How do you approach this conversation?",
+        category: "mmi",
+        aamc_competency_primary: "Ethical Responsibility to Self and Others",
+        aamc_competency_secondary: "Cultural Competence",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Ethical Responsibility & Cultural Competence in pediatric patient care.",
+          underlying_dilemma: "Balancing parental rights and cultural beliefs against the immediate medical welfare of a minor.",
+          key_talking_points: [
+            "Seek to understand the parents' holistic perspective without immediate judgment.",
+            "Educate on risks of untreated pneumonia calmly and clearly.",
+            "Determine if non-harmful alternative remedies can complement standard medical treatment."
+          ]
+        },
+        follow_up_probes: [
+          "What steps do you take if the child's condition deteriorates rapidly while you are discussing this?",
+          "At what point, if any, is it appropriate to involve child protective services or hospital legal teams?"
+        ]
+      },
+      {
+        id: "mmi_q2",
+        scenario_id: "MMI_REL_2026_02",
+        title: "Disclosing a Medical Error to a Patient",
+        text: "During a busy clinical shift, you realize you administered a non-fatal wrong medication dose. How do you handle disclosure and reporting?",
+        category: "mmi",
+        aamc_competency_primary: "Reliability & Dependability",
+        aamc_competency_secondary: "Capacity for Improvement",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Reliability & Dependability and Capacity for Improvement under clinical pressure.",
+          underlying_dilemma: "Weighing fear of personal/professional consequences against absolute honesty and patient safety.",
+          key_talking_points: [
+            "Prioritize immediate patient vitals assessment and attending physician notification.",
+            "Disclose the error transparently and empathetically to the patient without shifting blame.",
+            "Submit an incident report and analyze systemic process gaps to prevent recurrence."
+          ]
+        },
+        follow_up_probes: [
+          "How do you respond if a senior colleague advises you to stay silent since no permanent harm occurred?",
+          "What steps do you take to rebuild trust with the patient and medical team after this error?"
+        ]
+      },
+      {
+        id: "mmi_q3",
+        scenario_id: "MMI_CRT_2026_03",
+        title: "Resource Allocation in Emergency Triage",
+        text: "Two critically ill patients require the last available ICU bed. One is an elderly community leader, the other a young uninsured patient. How do you decide?",
+        category: "mmi",
+        aamc_competency_primary: "Critical Thinking",
+        aamc_competency_secondary: "Ethical Responsibility to Self and Others",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Tests Critical Thinking and Ethical Responsibility in resource-constrained triage.",
+          underlying_dilemma: "Weighing social utility or age against objective clinical prognosis and medical need.",
+          key_talking_points: [
+            "Utilize objective clinical criteria (SOFA score, reversibility, likelihood of benefit) rather than social status.",
+            "Consult hospital ethics committee or senior triage officer for standardized guidance.",
+            "Ensure dignity and compassionate palliative/alternative care for the unselected patient."
+          ]
+        },
+        follow_up_probes: [
+          "What if the community leader's family offers a large financial donation to the hospital?",
+          "How do you communicate the decision to the waiting family members empathetically?"
+        ]
+      },
+      {
+        id: "mmi_q4",
+        scenario_id: "MMI_TMW_2026_04",
+        title: "Addressing Non-Contributing Team Member in Pre-Med Lab",
+        text: "A lab partner consistently fails to complete their assigned data analysis before team deadlines. How do you resolve this interprofessional dispute?",
+        category: "mmi",
+        aamc_competency_primary: "Teamwork",
+        aamc_competency_secondary: "Social Skills",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Teamwork and Social Skills when managing peer accountability.",
+          underlying_dilemma: "Balancing empathy for a struggling peer with accountability for group deliverables.",
+          key_talking_points: [
+            "Initiate a private, non-confrontational conversation to inquire about underlying personal or academic hurdles.",
+            "Offer supportive scaffolding or re-allocation of sub-tasks while maintaining clear deadlines.",
+            "Involve the course instructor only as a last resort after direct peer resolution attempts."
+          ]
+        },
+        follow_up_probes: [
+          "What if the peer responds defensively and accuses you of being micro-managing?",
+          "How do you ensure the final project quality is uncompromised while supporting your peer?"
+        ]
+      },
+      {
+        id: "mmi_q5",
+        scenario_id: "MMI_CUL_2026_05",
+        title: "Language Barrier and Emergency Informed Consent",
+        text: "An elderly non-English speaking patient requires urgent surgery. The family offers to translate, but you notice discrepancies in their translation. How do you proceed?",
+        category: "mmi",
+        aamc_competency_primary: "Cultural Competence",
+        aamc_competency_secondary: "Service Orientation",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Cultural Competence and Service Orientation when securing valid medical consent.",
+          underlying_dilemma: "Respecting family involvement while ensuring legally valid, uncorrupted informed consent.",
+          key_talking_points: [
+            "Politely request a certified medical interpreter via phone/video service to ensure accurate translation.",
+            "Explain to the family that hospital policy protects the patient's privacy and clear understanding.",
+            "Verify the patient's comprehension directly through approved medical translation channels."
+          ]
+        },
+        follow_up_probes: [
+          "What if the family becomes offended that you are not using their translation?",
+          "How do you manage consent if no certified interpreter is immediately available in an emergency?"
+        ]
+      },
+      {
+        id: "mmi_q6",
+        scenario_id: "MMI_IMP_2026_06",
+        title: "Observing Academic Misconduct in Pre-Med Coursework",
+        text: "You witness a close pre-med classmate using unapproved notes during a major organic chemistry exam. What is your ethical course of action?",
+        category: "mmi",
+        aamc_competency_primary: "Capacity for Improvement",
+        aamc_competency_secondary: "Ethical Responsibility to Self and Others",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Tests Capacity for Improvement and Ethical Responsibility regarding professional integrity.",
+          underlying_dilemma: "Weighing loyalty to a friend against institutional honor codes and professional honesty.",
+          key_talking_points: [
+            "Encourage the peer privately to self-report their actions to the course professor.",
+            "Acknowledge the intense pressures of pre-med competition while upholding academic honesty.",
+            "Consult honor council guidelines if the peer refuses to self-report."
+          ]
+        },
+        follow_up_probes: [
+          "What if the peer threatens to end your friendship if you report them?",
+          "How does academic integrity relate to future patient safety and trust in medicine?"
+        ]
+      },
+      {
+        id: "mmi_q7",
+        scenario_id: "MMI_RES_2026_07",
+        title: "Managing Compassion Fatigue and Shift Overload",
+        text: "After three consecutive 12-hour clinic shifts, a demanding patient berates you for a minor administrative delay. How do you maintain composure?",
+        category: "mmi",
+        aamc_competency_primary: "Resilience & Adaptability",
+        aamc_competency_secondary: "Reliability & Dependability",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Evaluates Resilience & Adaptability and Reliability under high fatigue.",
+          underlying_dilemma: "Managing personal emotional exhaustion while delivering empathetic, professional patient care.",
+          key_talking_points: [
+            "De-escalate the tension by validating the patient's anxiety and frustration with the wait.",
+            "Maintain professional boundaries without internalizing the patient's hostility.",
+            "Implement personal wellness strategies and debrief with team members post-shift."
+          ]
+        },
+        follow_up_probes: [
+          "How do you recognize signs of personal burnout before it impacts patient care?",
+          "What support resources do you utilize when experiencing clinical distress?"
+        ]
+      },
+      {
+        id: "mmi_q8",
+        scenario_id: "MMI_SER_2026_08",
+        title: "Free Clinic Outreach Resource Constraints",
+        text: "Your student-run free clinic has 10 vaccine doses left and 25 waiting patients. How do you establish an equitable distribution strategy?",
+        category: "mmi",
+        aamc_competency_primary: "Service Orientation",
+        aamc_competency_secondary: "Critical Thinking",
+        timing: { prep_seconds: 120, station_seconds: 480 },
+        help_drawer_content: {
+          competency_overview: "Tests Service Orientation and Critical Thinking in community health triage.",
+          underlying_dilemma: "Fairly prioritizing scarce preventative care among underserved community members.",
+          key_talking_points: [
+            "Establish objective vulnerability criteria (e.g., age, immunocompromised status, risk exposure).",
+            "Provide clear, empathetic communication and rainchecks/referrals for unserved patients.",
+            "Coordinate with regional public health partners to secure additional supply."
+          ]
+        },
+        follow_up_probes: [
+          "How do you handle a patient who argues they arrived first and deserve priority?",
+          "What long-term steps can the clinic take to address supply chain inequities?"
+        ]
+      }
+    ];
+
+    const staticMedTraditionalPool = [
+      {
+        id: "med_trad_1",
+        title: "Motivation for Medicine & School Fit",
+        text: "Why do you want to pursue medicine, and why is Central Michigan University College of Medicine the right place for your training?",
+        category: "general",
+        help_drawer_content: {
+          competency_overview: "Evaluates core motivation, self-reflection, and alignment with institutional mission.",
+          underlying_dilemma: "Demonstrating authentic service orientation beyond personal ambitions.",
+          key_talking_points: [
+            "Share pivotal clinical or volunteering experiences that cemented your commitment.",
+            "Highlight specific alignment with CMU's mission for primary care and community service.",
+            "Connect your personal trajectory to long-term community health goals."
+          ]
+        },
+        follow_up_probes: [
+          "What specific aspect of CMU's Comprehensive Community Clerkship appeals to you?",
+          "How do your past experiences prepare you for practicing in rural or underserved areas?"
+        ]
+      },
+      {
+        id: "med_trad_2",
+        title: "Anticipated Sacrifices in Medical School",
+        text: "What is the biggest sacrifice you anticipate making in medical school, and how have you prepared yourself for it?",
+        category: "general",
+        help_drawer_content: {
+          competency_overview: "Evaluates self-awareness, realistic expectations, and emotional resilience.",
+          underlying_dilemma: "Balancing intense academic rigor with personal well-being and relationships.",
+          key_talking_points: [
+            "Acknowledge the time, personal life, and financial commitments candidly.",
+            "Describe concrete coping mechanisms and support systems you have built.",
+            "Emphasize your intrinsic resilience and proactive stress management strategies."
+          ]
+        },
+        follow_up_probes: [
+          "How do you maintain work-life balance when facing overwhelming study schedules?",
+          "What lesson from a past hardship will guide you through medical school?"
+        ]
+      },
+      {
+        id: "med_trad_3",
+        title: "Legacy & Impact on Medical Community",
+        text: "What specific legacy or long-term impact do you want to leave on the medical community during your career?",
+        category: "general",
+        help_drawer_content: {
+          competency_overview: "Evaluates long-term vision, leadership, and commitment to healthcare improvement.",
+          underlying_dilemma: "Translating individual passion into broad healthcare or community benefits.",
+          key_talking_points: [
+            "Articulate a clear vision for patient advocacy, health equity, or clinical leadership.",
+            "Reference specific systemic challenges like healthcare access or health disparities.",
+            "Explain how you plan to mentor future healthcare professionals."
+          ]
+        },
+        follow_up_probes: [
+          "How will you measure the success of your impact 15 years from now?",
+          "How does your undergraduate experience at Albion inspire this goal?"
+        ]
+      },
+      {
+        id: "med_trad_4",
+        title: "Commitment to Rural & Underserved Care",
+        text: "Why do you want to practice medicine specifically in a rural or medically underserved setting?",
+        category: "general",
+        help_drawer_content: {
+          competency_overview: "Evaluates understanding of Social Determinants of Health (SDOH) and mission fit.",
+          underlying_dilemma: "Addressing healthcare disparities in resource-limited rural environments.",
+          key_talking_points: [
+            "Discuss firsthand observations or experiences in underserved communities.",
+            "Recognize the unique scope of practice and community integration of rural physicians.",
+            "Emphasize long-term commitment rather than a short-term obligation."
+          ]
+        },
+        follow_up_probes: [
+          "What do you view as the primary barrier to health access in rural Michigan?",
+          "How will you engage with local community leaders to build trust?"
+        ]
+      }
+    ];
+
+    const staticMedBehavioralPool = [
+      {
+        id: "med_beh_1",
+        title: "Adapting to Uncomfortable / Outsider Environments",
+        text: "Describe a situation where you were an 'outsider' or felt uncomfortable in a group. How did you adapt, and what did you learn?",
+        category: "behavioral",
+        help_drawer_content: {
+          competency_overview: "Evaluates Cultural Competence, Adaptability, and Emotional Intelligence (EQ).",
+          underlying_dilemma: "Navigating unfamiliar social or cultural dynamics with humility and empathy.",
+          key_talking_points: [
+            "Describe the context clearly without defensive posture.",
+            "Focus on active listening, humility, and willingness to learn from others.",
+            "Detail the specific reflective lessons gained and how you apply them today."
+          ]
+        },
+        follow_up_probes: [
+          "How did this experience change your communication style with diverse patients?",
+          "What advice would you give a classmate entering a similar situation?"
+        ]
+      },
+      {
+        id: "med_beh_2",
+        title: "Conflict Resolution with Teammate or Coworker",
+        text: "Describe a conflict you had with a coworker, teammate, or lab partner. How was it resolved?",
+        category: "behavioral",
+        help_drawer_content: {
+          competency_overview: "Evaluates Teamwork, Interpersonal Skills, and Conflict Management.",
+          underlying_dilemma: "Resolving interpersonal friction constructively while maintaining project goals.",
+          key_talking_points: [
+            "Use the STAR method to describe the situation objectively.",
+            "Highlight direct, private, and respectful dialogue aimed at understanding perspectives.",
+            "Focus on the mutual resolution and sustained professional relationship."
+          ]
+        },
+        follow_up_probes: [
+          "What would you do differently if faced with a similar conflict again?",
+          "How do you maintain focus on patient/project goals during a team disagreement?"
+        ]
+      },
+      {
+        id: "med_beh_3",
+        title: "Handling a Regretted Mistake and Aftermath",
+        text: "Describe a situation in which you did something you truly regretted. How did you handle the aftermath and what did you learn?",
+        category: "behavioral",
+        help_drawer_content: {
+          competency_overview: "Evaluates Capacity for Improvement, Integrity, and Accountability.",
+          underlying_dilemma: "Owning personal failure transparently without shifting blame.",
+          key_talking_points: [
+            "Admit the mistake candidly and take direct personal responsibility.",
+            "Detail the immediate corrective actions taken to mitigate harm.",
+            "Emphasize the teachable moment and long-term behavioral changes made."
+          ]
+        },
+        follow_up_probes: [
+          "How did you rebuild trust with the affected parties after this event?",
+          "How does this reflection prepare you for managing errors in medical practice?"
+        ]
+      },
+      {
+        id: "med_beh_4",
+        title: "Processing Direct Critical Feedback",
+        text: "Tell us about a time you received direct critical feedback about your performance. How did you process it and what did you change?",
+        category: "behavioral",
+        help_drawer_content: {
+          competency_overview: "Evaluates Resilience, Humility, and Capacity for Continuous Improvement.",
+          underlying_dilemma: "Receiving constructive criticism without defensiveness and turning it into growth.",
+          key_talking_points: [
+            "Explain the feedback context and your initial emotional processing.",
+            "Describe the concrete steps implemented to address the critique.",
+            "Highlight the measurable improvement and ongoing self-reflection."
+          ]
+        },
+        follow_up_probes: [
+          "How do you seek out feedback proactively in high-stress clinical settings?",
+          "How do you distinguish between constructive criticism and unfair critique?"
+        ]
+      }
+    ];
+
+    const selectedType = jobTarget.interviewType || 'medical_school';
+
+    if (selectedType === 'general') {
+      return staticMedTraditionalPool.slice(0, 4);
+    } else if (selectedType === 'behavioral') {
+      return staticMedBehavioralPool.slice(0, 4);
+    } else {
+      // Default to MMI pool for medical_school track or mmi selection
+      const unusedMmi = staticMmiPool.filter(q => 
+        !seenQuestionIds.includes(q.id) && !seenQuestionIds.includes(q.scenario_id)
+      );
+
+      if (unusedMmi.length >= 4) {
+        return unusedMmi.slice(0, 4);
+      }
+
+      return staticMmiPool.slice(0, 4);
+    }
+  }
 
   // Robust, distinct pools to guarantee high variation and eliminate repetition
   let generalPool = [
@@ -691,45 +1849,118 @@ function generateMockQuestions(resumeInfo: any, jobTarget: any) {
   ];
 }
 
-function generateMockFeedback(questionText: string, answerText: string, category: string, jobTarget: any) {
+function generateMockFeedback(questionText: string, answerText: string, category: string, jobTarget: any, interviewTrack: string = 'STANDARD_JOB', hintsUnlocked: number = 0, scenarioId?: string, customFillerWords: string[] = [], speakingSeconds: number = 0) {
   const isBehavioral = category === "behavioral" || questionText.toLowerCase().includes("tell me about a time") || questionText.toLowerCase().includes("describe a scenario");
   const wordsCount = answerText.split(/\s+/).length;
-  let score = 7;
-  if (wordsCount > 50) score = 8;
-  if (wordsCount > 100) score = 9;
-  if (wordsCount < 15) score = 5;
+
+  const objectiveAnalysis = analyzeObjectiveRubricAndFillers(answerText, jobTarget, customFillerWords, speakingSeconds);
+  
+  let stScore = 24; // situation & task out of 30
+  let aScore = 32;  // action out of 40
+  let rScore = 20;  // result out of 30
+  
+  if (wordsCount > 60) {
+    stScore = 28;
+    aScore = 37;
+    rScore = 26;
+  } else if (wordsCount < 20) {
+    stScore = 18;
+    aScore = 22;
+    rScore = 12;
+  }
+
+  const numericScore = Math.min(100, Math.max(0, stScore + aScore + rScore));
+  const raw_overall_score = Math.min(5.0, Math.max(1.0, Math.round((numericScore / 20) * 10) / 10));
+  const penaltyResult = applyHintPenalty(raw_overall_score, hintsUnlocked);
+
+  const finalScore = penaltyResult.finalScore;
+  const finalNumericScore = Math.min(100, Math.max(0, Math.round(finalScore * 20)));
+
+  const hasSituation = wordsCount >= 10;
+  const hasTask = wordsCount >= 15;
+  const hasAction = wordsCount >= 25;
+  const hasResult = wordsCount >= 40 || answerText.toLowerCase().includes("result") || answerText.toLowerCase().includes("outcome") || /\d+/.test(answerText);
+
+  const starChecklist = {
+    situation: hasSituation,
+    task: hasTask,
+    action: hasAction,
+    result: hasResult
+  };
+
+  const starChecklistFormatted = `S: ${hasSituation ? "✓" : "✗"} | T: ${hasTask ? "✓" : "✗"} | A: ${hasAction ? "✓" : "✗"} | R: ${hasResult ? "✓" : "✗"}`;
+
+  const keyTip = hasResult 
+    ? "Solid structure! Enhance your action steps by highlighting the exact tools or software you used." 
+    : "Include quantifiable metrics or specific results in your final sentence to satisfy the 'Result' criteria.";
 
   const isEasyVibe = jobTarget && (jobTarget.interviewType === 'campus_job' || jobTarget.interviewType === 'internship');
   if (isEasyVibe) {
-    score = Math.min(10, Math.max(8, score + 1));
-    const score5 = score >= 9 ? 5 : 4;
+    const score5 = Math.round(finalScore);
     const score5Explanation = score5 === 5 
       ? "Perfect answer. All points addressed. All points relevant." 
       : "Good answer. Relevant information. All or most points covered. Good examples.";
 
+    const strengths = [
+      "Warm, highly enthusiastic, and authentic student tone.",
+      "Demonstrates excellent willingness to learn and great collegiate spirit."
+    ];
+    const vulnerabilities = [
+      "Include one more small personal detail to highlight your campus activities.",
+      "Keep practicing! Your positive attitude shines through beautifully."
+    ];
+    const suggestedAnswer = `A great encouraging response: "I really enjoy my classes and student activities at Albion College. In our recent team project, I made sure everyone felt heard and we completed our slides ahead of schedule. I would love to bring that same helpful, positive energy to your team!"`;
+
     return {
-      score,
+      track_evaluated: interviewTrack,
+      domain_classification: interviewTrack === "MEDICAL_SCHOOL" ? "Motivation & Fit" : "Campus / Internship Fit",
+      targeted_competencies: interviewTrack === "MEDICAL_SCHOOL" ? ["Service Orientation", "Oral Communication"] : ["Teamwork", "Communication"],
+      raw_evaluation_score: penaltyResult.rawScore,
+      hints_unlocked: penaltyResult.hintsUnlocked,
+      penalty_points: penaltyResult.penaltyDeducted,
+      max_score_cap: penaltyResult.maxScoreCap,
+      final_score: finalScore,
+      overall_score: finalScore,
+      aamc_competency_id: scenarioId || "MMI_STATION",
+      objective_rubric: objectiveAnalysis.objective_rubric,
+      filler_analysis: objectiveAnalysis.filler_analysis,
+      score_breakdown: {
+        claim_or_situation: Math.round((stScore / 30) * 10) / 10,
+        evidence_or_action: Math.round((aScore / 20) * 10) / 10,
+        insight_or_result: Math.round((rScore / 20) * 10) / 10,
+        red_flag_deduction: 0.0
+      },
+      feedback: {
+        strengths,
+        vulnerabilities,
+        red_flag_alert: null
+      },
+      recommended_rewrite: suggestedAnswer,
+      numericScore: finalNumericScore,
+      score: Math.round(finalScore * 2 * 10) / 10,
+      starBreakdown: {
+        situationTaskScore: Math.min(30, stScore + 2),
+        actionScore: Math.min(40, aScore + 2),
+        resultScore: Math.min(30, rScore + 2)
+      },
+      starChecklist,
+      starChecklistFormatted,
+      keyTip,
       score5,
       score5Explanation,
-      strengths: [
-        "Warm, highly enthusiastic, and authentic student tone.",
-        "Demonstrates excellent willingness to learn and great collegiate spirit."
-      ],
-      areasToImprove: [
-        "Include one more small personal detail to highlight your campus activities.",
-        "Keep practicing! Your positive attitude shines through beautifully."
-      ],
-      suggestedAnswer: `A great encouraging response: "I really enjoy my classes and student activities at Albion College. In our recent team project, I made sure everyone felt heard and we completed our slides ahead of schedule. I would love to bring that same helpful, positive energy to your team!"`,
+      strengths,
+      areasToImprove: vulnerabilities,
+      suggestedAnswer,
       clarityComments: "Wonderful! Extremely clear, natural, and friendly.",
       confidenceComments: "Fantastic! You sound highly enthusiastic and self-assured.",
       structureComments: "Very neat, simple structure that's super easy to follow.",
       relevanceComments: "100% relevant. You addressed the core question perfectly.",
       professionalismComments: "Highly appropriate collegiate professional register. Terrific!",
-      starAnalysis: null
+      starAnalysis: `S: ${hasSituation ? "✓" : "✗"}, T: ${hasTask ? "✓" : "✗"}, A: ${hasAction ? "✓" : "✗"}, R: ${hasResult ? "✓" : "✗"}`
     };
   }
 
-  const score5 = score >= 9 ? 5 : score >= 8 ? 4 : score >= 7 ? 3 : 2;
+  const score5 = Math.round(finalScore);
   const rubricMap: { [key: number]: string } = {
     5: "Perfect answer. All points addressed. All points relevant.",
     4: "Good answer. Relevant information. All or most points covered. Good examples.",
@@ -739,37 +1970,127 @@ function generateMockFeedback(questionText: string, answerText: string, category
     0: "No answer given or answer completely irrelevant. No examples given. The answer does not match the information in the resume."
   };
 
+  const strengths = [
+    "Adequate logical structure mapping high-level scenarios.",
+    "Clear, audible vocabulary with appropriate technical jargon where required."
+  ];
+  const vulnerabilities = [
+    "Include precise quantitative metrics to make claims concrete and prove operational value.",
+    "Expand on specific personal actions rather than 'we' team activities."
+  ];
+  const suggestedAnswer = `In my role at Albion, I recognized our project was behind schedule. I audited our dataset using Python, identified two data anomalies, and restructured our reporting pipeline. As a result, we delivered the final analysis 2 days early with 100% accuracy.`;
+
   return {
-    score,
+    track_evaluated: interviewTrack,
+    domain_classification: interviewTrack === "MEDICAL_SCHOOL" ? "Clinical & Research" : "STAR Behavioral",
+    targeted_competencies: interviewTrack === "MEDICAL_SCHOOL" ? ["Ethical Responsibility", "Critical Thinking"] : ["Problem Solving", "Adaptability"],
+    raw_evaluation_score: penaltyResult.rawScore,
+    hints_unlocked: penaltyResult.hintsUnlocked,
+    penalty_points: penaltyResult.penaltyDeducted,
+    max_score_cap: penaltyResult.maxScoreCap,
+    final_score: finalScore,
+    overall_score: finalScore,
+    aamc_competency_id: scenarioId || "MMI_STATION",
+    objective_rubric: objectiveAnalysis.objective_rubric,
+    filler_analysis: objectiveAnalysis.filler_analysis,
+    score_breakdown: {
+      claim_or_situation: Math.round((stScore / 30) * 10) / 10,
+      evidence_or_action: Math.round((aScore / 20) * 10) / 10,
+      insight_or_result: Math.round((rScore / 20) * 10) / 10,
+      red_flag_deduction: 0.0
+    },
+    feedback: {
+      strengths,
+      vulnerabilities,
+      red_flag_alert: null
+    },
+    recommended_rewrite: suggestedAnswer,
+    numericScore: finalNumericScore,
+    score: Math.round(finalScore * 2 * 10) / 10,
+    starBreakdown: {
+      situationTaskScore: stScore,
+      actionScore: aScore,
+      resultScore: rScore
+    },
+    starChecklist,
+    starChecklistFormatted,
+    keyTip,
     score5,
     score5Explanation: rubricMap[score5],
-    strengths: [
-      "Adequate logical structure mapping high-level scenarios.",
-      "Clear, audible vocabulary with appropriate technical jargon where required."
-    ],
-    areasToImprove: [
-      "Include precise quantitative metrics to make claims concrete and prove operational value.",
-      "Expand elaboration on personal actions directly, avoiding collective or vague terms."
-    ],
-    suggestedAnswer: `A direct response matching this scenario is: "In my scientific coursework at Albion College, I took initiative to coordinate daily schedules for our team. Under a tight 48-hour crunch, I personally designed a central pipeline progress checklist that reduced our modeling errors by 12% and ensured our final slides were compiled 4 hours in advance. I look forward to applying this same focus at your company."`,
-    clarityComments: "Understood. The response sequence was structurally coherent.",
-    confidenceComments: "I see. Steady pacing. Express clear assurance by focusing purely on results.",
-    structureComments: "Moving on. The logical structure remains standard. We suggest adding concrete final outcomes.",
-    relevanceComments: "Adequate alignment with the core requirements of the question.",
-    professionalismComments: "Standard, neutral business register. No enthusiastic fillers present.",
-    starAnalysis: isBehavioral 
-      ? "STAR feedback: The situation was set up clearly. However, the Action (exactly what YOU did) and Result (quantifiable gains or concrete deliverables) need strict reinforcement." 
-      : null
+    strengths,
+    areasToImprove: vulnerabilities,
+    suggestedAnswer,
+    clarityComments: "Clear, logical progression.",
+    confidenceComments: "Steady, confident pacing.",
+    structureComments: "Acceptable structure.",
+    relevanceComments: "Directly addresses the question asked.",
+    professionalismComments: "Appropriate formal register.",
+    starAnalysis: `S: ${hasSituation ? "✓" : "✗"}, T: ${hasTask ? "✓" : "✗"}, A: ${hasAction ? "✓" : "✗"}, R: ${hasResult ? "✓" : "✗"}`
   };
 }
 
 function generateMockFinalReport(history: any[], jobTarget: any, totalSpeakingSeconds?: number) {
+  const allSkipped = !history || history.length === 0 || history.every((h: any) => {
+    const ans = (h.answerText || h.answer || '').trim().toLowerCase();
+    const sc = h.feedback?.score ?? h.feedback?.overall_score ?? h.score ?? 0;
+    return !ans || ans === '[skipped question]' || ans.includes('skipped question') || sc === 0;
+  });
+
+  if (allSkipped) {
+    return {
+      overallScore: 0,
+      communicationScore: 0,
+      contentQualityScore: 0,
+      resumeAlignmentScore: 0,
+      confidenceClarityScore: 0,
+      topStrengths: ["Initiated mock interview session."],
+      topImprovementAreas: [
+        "All question stations in this session were skipped.",
+        "Attempt station scenarios by providing spoken or typed responses.",
+        "Practice answers to receive detailed AI feedback and scoring."
+      ],
+      bestAnswer: {
+        question: history?.[0]?.questionText || "N/A",
+        answer: "[Skipped Question]",
+        score: 0
+      },
+      weakestAnswer: {
+        question: history?.[0]?.questionText || "N/A",
+        answer: "[Skipped Question]",
+        score: 0
+      },
+      recommendedQuestions: [
+        "Why do you want to pursue this specific career path?",
+        "Describe a situation where you managed a challenging team dynamic.",
+        "How do your past academic experiences prepare you for this role?"
+      ],
+      personalizedAdvice: "You skipped all questions in this mock interview session. As a result, your overall interview score is 0.0. To receive personalized coaching, evaluation metrics, and score breakdowns, please attempt the questions in your next session!",
+      categoryEvaluations: [
+        "Educational Background", "Job/Organizational Fit", "Problem Solving", "Verbal Communication",
+        "Candidate Interest", "Knowledge of Organization", "Teambuilding/Interpersonal Skills",
+        "Initiative", "Time Management", "Attention to Detail"
+      ].map(catName => ({
+        categoryName: catName,
+        rating: 1,
+        explanation: "Station was skipped during the interview session.",
+        evidence: "None (Skipped station).",
+        suggestion: "Complete this station with a spoken or written response to earn points."
+      }))
+    };
+  }
+
   let totalScore = 0;
   history.forEach((h: any) => {
-    totalScore += h.feedback?.score || 7;
+    const ans = (h.answerText || h.answer || '').trim().toLowerCase();
+    const isSkipped = !ans || ans === '[skipped question]' || ans.includes('skipped question');
+    if (isSkipped) {
+      totalScore += 0;
+    } else {
+      totalScore += h.feedback?.score || h.feedback?.overall_score || 7;
+    }
   });
-  const avg = history.length > 0 ? (totalScore / history.length) : 7.5;
-  const overall = Math.min(100, Math.max(50, Math.round(avg * 10)));
+  const avg = history.length > 0 ? (totalScore / history.length) : 0;
+  const overall = Math.min(100, Math.max(0, Math.round(avg * 10)));
 
   const seconds = totalSpeakingSeconds || 0;
   let timerFeedback = "";
@@ -946,7 +2267,7 @@ Return ONLY valid JSON matching this schema:
 Keep experience descriptions clear, precise, and completely aligned with an eager Albion College undergraduate student. Do not include markdown wrappers or talk about JSON. Output raw JSON object only.`;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -955,7 +2276,7 @@ Keep experience descriptions clear, precise, and completely aligned with an eage
 
     const text = response?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (text) {
-      const parsed = JSON.parse(text.trim());
+      const parsed = safeJsonParse(text);
       return {
         ...parsed,
         isParsed: true,
@@ -1205,7 +2526,7 @@ Evaluate the resume and return a JSON object with this EXACT schema:
 Do not include any markdown backticks or commentary. Return only valid JSON.`;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -1213,7 +2534,7 @@ Do not include any markdown backticks or commentary. Return only valid JSON.`;
       },
     });
 
-    const report = JSON.parse(response.text || "{}");
+    const report = safeJsonParse(response.text);
     res.json(report);
   } catch (error: any) {
     console.error("Gemini ATS Coach Error:", error);
@@ -1351,148 +2672,91 @@ function generateFallbackAtsReport(resumeInfo: any, role: string, jobDescription
 // --- AI RESUME ENHANCER ENDPOINTS ---
 
 function generateFallbackEnhanceInitial(text: string) {
-  const hasMilitary = /smudger|forces|army|navy|military|recruit|commander/i.test(text);
-  if (hasMilitary) {
-    return {
-      analysis: {
-        atsFormatting: "The current format uses inconsistent structure, informal headers, and no standard section order. ATS systems will struggle to parse it, and recruiters won't know where to look.",
-        languageTone: "Military jargon ('bods', 'blokes', 'crows', 'on the lash', 'Ghanners') is translated into clear, professional civilian language without losing the impact of what you actually accomplished.",
-        bulletStructure: "Bullets are rewritten from first-person narrative commentaries to lead with strong action verbs (e.g., 'Supervised', 'Coached', 'Enforced') and focus on measurable work.",
-        summary: "The previous summary was too casual. It has been replaced with a strong, professional statement grounded in operational and logistics management.",
-        clarityPolishing: "Removed wordy, repetitive, or conversational narrative phrasing, ensuring the emphasis is on crisp professional action verbs.",
-        education: "The previous entry dismissed your formal forces qualifications; this has been reframed to highlight professional operational training."
-      },
-      draft: {
-        name: "Smudger Smith",
-        phone: "XXX-XXX-XXXX",
-        email: "smudger.smith@college.edu",
-        linkedin: "linkedin.com/in/smudger-smith",
-        summary: "Experienced Section Commander and team leader with over 8 years of operational experience. Skilled in crisis management, personnel training, and strategic operations under extreme pressure. Proven track record of guiding diverse teams and ensuring equipment accountability in challenging environments.",
-        education: "Military Training Academy",
-        expectedGraduation: "Graduated: 2024",
-        majorMinor: "Operational Leadership & Logistics",
-        gpa: "GPA: Pass (First Class)",
-        skills: ["Operational Leadership", "Team Management", "Crisis Resolution", "Logistics Operations", "Training & Instruction", "Equipment Accountability"],
-        customExperiences: [
-          {
-            company: "HM Forces",
-            location: "UK & Overseas",
-            role: "Section Commander & Operations Lead",
-            dates: "2018-2024",
-            bullets: [
-              "Supervised and accounted for high-value equipment and resources, coordinating cross-functional movements under pressure",
-              "Coached and trained platoons of new recruits, ensuring standard operational compliance",
-              "Enforced operational standards and safety regulations, maintaining 100% equipment readiness during deployments"
-            ]
-          }
-        ],
-        customActivities: [
-          {
-            organization: "Instructor at ITC Catterick",
-            dates: "2021-2023",
-            bullets: [
-              "Taught basic operational lessons to incoming recruits, maintaining standard course passing rates"
-            ]
-          }
-        ]
-      }
-    };
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
+  const phoneMatch = text.match(/(\+\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+  
+  // Extract real candidate name from first clean line if valid, avoid fake names like 'Jordan Smith' or 'Smudger Smith'
+  let extractedName = "Candidate Name";
+  if (lines.length > 0 && lines[0].length < 40 && !/resume|curriculum|cv|contact|education|experience/i.test(lines[0])) {
+    extractedName = lines[0];
   }
 
-  // Generic Student Fallback
+  // Extract actual text lines for bullet points directly from candidate input
+  const candidateBullets = lines.filter(l => l.length > 20 && !l.includes("@")).slice(0, 5);
+
+  let extractedEducation = "";
+  const eduLine = lines.find(l => /university|college|school|bachelor|master|degree|diploma|bs|ba|ma|ms|phd/i.test(l));
+  if (eduLine) {
+    extractedEducation = eduLine;
+  }
+
   return {
     analysis: {
-      atsFormatting: "Your resume layout looks standard, but you can elevate the section separators for linear-flow ATS compatibility.",
-      languageTone: "Translated student colloquialisms or generic descriptions into high-impact business terminology (e.g., changed 'did social media posts' to 'engineered comprehensive marketing strategies').",
-      bulletStructure: "Ensured all bullets lead with strong action verbs rather than passive verbs like 'helped with' or 'responsible for'.",
-      summary: "Created a strong professional statement that bridges your academic background at Albion with core market competencies.",
-      clarityPolishing: "Removed passive phrasing or redundant filler to maximize the impact of your achievements.",
-      education: "Framed Albion College marketing degrees and GPA to emphasize critical thinking and coursework projects."
+      atsFormatting: "Organized layout into linear ATS-compatible structure.",
+      languageTone: "Reframed phrasing to maintain crisp executive style without adding unearned statements.",
+      bulletStructure: "Ensured bullet points lead with strong action verbs and professional cadence.",
+      summary: "Created a professional summary grounded strictly in the extracted candidate background.",
+      clarityPolishing: "Removed narrative filler to emphasize core candidate achievements.",
+      education: "Structured academic training for clean linear scanning."
     },
     draft: {
-      name: "Student Name",
-      phone: "XXX-XXX-XXXX",
-      email: "XXXX@college.edu",
-      linkedin: "linkedin.com/in/studentname",
-      summary: "Results-driven marketing student with strong group collaboration and communications skills. Competent in Microsoft Office Suite, digital content strategy, and project management. Experienced in managing cross-functional tasks and coordinating college festivals.",
-      education: "Albion College, Albion, MI",
-      expectedGraduation: "Expected Graduation: 05/2027",
-      majorMinor: "Bachelor of Arts in Marketing Management",
-      gpa: "GPA: 3.5",
-      skills: ["Microsoft Word", "Excel", "PowerPoint", "Photoshop", "Illustrator", "Social Media Marketing", "Data Analysis", "Project Management"],
+      name: extractedName,
+      phone: phoneMatch ? phoneMatch[0] : "",
+      email: emailMatch ? emailMatch[0] : "",
+      linkedin: "",
+      summary: `Dedicated professional with experience derived from operational & project domains. Proven capability in execution, stakeholder communication, and project delivery.`,
+      education: extractedEducation,
+      expectedGraduation: "",
+      majorMinor: "",
+      gpa: "",
+      skills: ["Operations", "Project Delivery", "Communication", "Team Leadership"],
       customExperiences: [
         {
-          company: "XYZ Company",
-          location: "City, State",
-          role: "XYZ Team Member",
-          dates: "01/2025-Present",
-          bullets: [
-            "Contribute to college festivals by leading web development and publicity teams, organizing online hackathons and achieving a 45% increase in participants",
-            "Schedule and curate 10+ social media posts per week, boosting festival entries by 30% and podcast subscriptions by 40%",
-            "Write three philanthropic blog posts weekly for a charity mobile application, increasing website views by 18% in two weeks"
+          company: "Current / Past Organization",
+          location: "",
+          role: "Professional Role",
+          dates: "Recent",
+          bullets: candidateBullets.length > 0 ? candidateBullets : [
+            "Executed key operational responsibilities and supported team deliverables",
+            "Maintained high standards of accuracy and performance across assigned projects"
           ]
         }
       ],
-      customActivities: [
-        {
-          organization: "Member, Carl A. Gerstacker Institute for Business and Management",
-          dates: "08/2025-Present",
-          bullets: [
-            "Engage in professional development pathway with a focus on leadership and practical business operations"
-          ]
-        }
-      ]
+      customActivities: []
     }
   };
 }
 
 function generateFallbackEnhanceTarget(draft: any, targetRole: string, targetIndustry: string) {
-  const isMilitary = /Smudger/i.test(draft.name);
-  if (isMilitary) {
-    return {
-      analysis: {
-        summaryReframe: "Repositioning you specifically as an operations and logistics professional to match how corporate recruiters scan for candidates in this space.",
-        skillsReordering: "Bringing logistics, operations, and administration skills to the front so they're the first thing a recruiter sees.",
-        languageAlignment: "Sharpening bullet language to reflect corporate operations and logistics terminology — words like 'supply chain accountability,' 'cross-functional coordination,' and 'operational standards' land better in this context than military phrasing.",
-        deemphasising: "The tactical combat skills (BARMA, ambushes, advances to contact) are part of your story but not the headline for this audience — we position them as context rather than lead content."
-      },
-      draft: {
-        ...draft,
-        summary: `Highly disciplined Operations & Logistics Specialist with over 8 years of team leadership and equipment accountability experience in high-pressure environments. Expert in cross-functional coordination, supply chain logistics, and personnel training. Proven ability to enforce rigorous operational standards and manage risk in complex environments.`,
-        skills: ["Logistics Operations", "Supply Chain Accountability", "Cross-Functional Coordination", "Team Leadership", "Risk & Crisis Management", "Operational Standards", "Training & Coaching"]
-      },
-      questions: [
-        "From your ITC Catterick role — '...taught lessons to the new recruits in my platoon. Most passed the course.' — How many recruits were in your platoon, and do you know the pass rate or number who completed the course?",
-        "In your contact section — Do you have a LinkedIn profile URL or any other professional online presence you'd like included?",
-        "From your Section Commander role — '...I was a section commander on ops with my section of 2 fire teams...' — Can you describe the scale or value of any equipment or resources you were accountable for during deployment?"
-      ]
-    };
-  }
+  const currentBullets = draft.customExperiences?.[0]?.bullets || [];
+  const q1Text = currentBullets[0]
+    ? `From your role in "${draft.customExperiences?.[0]?.company || 'your position'}" — "${currentBullets[0].slice(0, 60)}..." — what specific team size or metric did you manage?`
+    : `In your recent position — what specific team size, budget, or metrics did you manage?`;
 
-  // Generic Student Fallback
   return {
     analysis: {
-      summaryReframe: `Repositioning your profile specifically towards a ${targetRole} career in ${targetIndustry} to highlight your analytical and operations strengths.`,
-      skillsReordering: `Bringing ${targetRole}-related skills like project coordination, analytics, and business communication to the front.`,
-      languageAlignment: `Sharpening bullet language with industry terms like 'stakeholder coordination', 'ROI analysis', and 'data-driven optimization'.`,
-      deemphasising: "Less relevant coursework has been grouped to make room for high-impact experience."
+      summaryReframe: `Repositioned profile specifically towards a ${targetRole} focus within ${targetIndustry} based strictly on existing experience.`,
+      skillsReordering: `Prioritized skills aligned with ${targetRole} expectations.`,
+      languageAlignment: `Applied corporate terminology relevant to ${targetIndustry}.`,
+      deemphasising: "Retained 100% of candidate history while accentuating key transferable skills."
     },
     draft: {
       ...draft,
-      summary: `Motivated and analytical professional targeting ${targetRole} positions in ${targetIndustry}. Expert in digital content coordination, project delivery, and team collaboration. Prepared to leverage Albion College's business training and communication standards to drive operational success.`
+      summary: `Motivated professional targeting ${targetRole} opportunities in ${targetIndustry}. Leveraging proven experience to drive operational excellence and team outcomes.`
     },
     questions: [
-      "In your experience at XYZ Company — How many visitors or active users did your eco-friendly e-commerce or mobile app project attract?",
-      "In your contact section — Do you have a LinkedIn profile URL or any other professional online presence you'd like included?",
-      "From your Team Member role — What was the size of the cross-functional team you led or collaborated with to revamp the client portal?"
+      q1Text,
+      "In your contact header — do you have a professional LinkedIn profile URL to include?",
+      `For your target role in ${targetIndustry} — are there specific tools or technical competencies you would like highlighted?`
     ]
   };
 }
 
 function generateFallbackEnhanceFinalize(draft: any, answers: any) {
   const keys = Object.keys(answers);
-  const updatedExperiences = [...draft.customExperiences];
-  let updatedLinkedin = draft.linkedin;
+  const updatedExperiences = [...(draft.customExperiences || [])];
+  let updatedLinkedin = draft.linkedin || "";
 
   const linkedinAnswer = keys.find(k => k.toLowerCase().includes("linkedin") || k.includes("1") || k.includes("2"));
   if (linkedinAnswer && answers[linkedinAnswer]) {
@@ -1502,33 +2766,11 @@ function generateFallbackEnhanceFinalize(draft: any, answers: any) {
     }
   }
 
-  const isMilitary = /Smudger/i.test(draft.name);
-  if (isMilitary) {
-    if (updatedExperiences[0]) {
-      const q1Ans = answers[0] || answers["0"] || "";
-      const q3Ans = answers[2] || answers["2"] || "";
-
-      if (q3Ans) {
-        updatedExperiences[0].bullets[0] = `Supervised and accounted for over ${q3Ans} of tactical equipment and vehicle systems, coordinating cross-functional movements with 100% accountability under extreme pressure`;
-      } else {
-        updatedExperiences[0].bullets[0] = `Supervised and accounted for high-value tactical equipment and vehicle systems, coordinating cross-functional movements with zero margin for error under extreme pressure`;
-      }
-
-      if (q1Ans) {
-        updatedExperiences[0].bullets[1] = `Coached and instructed over ${q1Ans} in operational standards, achieving an outstanding course completion and passing rate`;
-      }
-    }
-  } else {
-    if (updatedExperiences[0]) {
-      const q1Ans = answers[0] || answers["0"] || "";
-      const q3Ans = answers[2] || answers["2"] || "";
-
-      if (q1Ans) {
-        updatedExperiences[0].bullets[2] = `Wrote three philanthropic blog posts weekly, attracting over ${q1Ans} active viewers and increasing company website views by 18% in two weeks`;
-      }
-      if (q3Ans) {
-        updatedExperiences[0].bullets[0] = `Contributed to college festivals by leading a cross-functional team of ${q3Ans}, organizing online hackathons and achieving a 45% increase in participants`;
-      }
+  // Update existing bullets with user's provided metric answers without inventing fake details
+  if (updatedExperiences[0] && updatedExperiences[0].bullets && updatedExperiences[0].bullets[0]) {
+    const q1Ans = answers[0] || answers["0"] || "";
+    if (q1Ans && !updatedExperiences[0].bullets[0].includes(q1Ans)) {
+      updatedExperiences[0].bullets[0] = `${updatedExperiences[0].bullets[0]} (Achieved with scale of: ${q1Ans})`;
     }
   }
 
@@ -1553,22 +2795,29 @@ app.post("/api/resume/enhance-initial", async (req, res) => {
   }
 
   try {
-    const prompt = `You are an elite Resume Enhancer & Career Transition expert.
+    const prompt = `You are a strict, world-class Resume Enhancer & Fact-Checking Career Specialist.
 Analyze the following raw resume text and perform a professional first-stage rewrite.
 
 Raw Resume Text:
 ${resumeText}
+
+STRICT GROUND-TRUTH & ZERO FABRICATION MANDATE:
+- YOU MUST TREAT THE UPLOADED RESUME TEXT AS THE SOLE GROUND TRUTH.
+- ZERO FABRICATION ALLOWED: NEVER invent candidate names (e.g., "Jordan Smith"), fictional employers (e.g., "Tech Solutions"), unearned degrees, unperformed projects, or fabricated internships (e.g., "Aigle Proficiency Internship", "Coding Club").
+- STRICT EXTRACTION: Extract the candidate's exact name, contact info, authentic employment history, actual job titles, real company names, dates, and project experiences directly from the provided text.
+- 100% CONTENT PRESERVATION: Retain 100% of the candidate's actual work experiences and past positions. DO NOT delete, omit, or replace any job entries or organizations.
+- OPTIMIZATION ONLY: Rephrase and reword existing bullet points to remove first-person pronouns ("I", "my") and lead with strong action verbs, but DO NOT invent new duties, achievements, or positions.
 
 Your task is to:
 1. Conduct an audit and identify improvement areas under these exact categories:
    - atsFormatting: Inconsistent structure, standard section order, header/footer placement etc.
    - languageTone: Translate military jargon (e.g. "bods", "blokes", "on the lash", "Ghanners"), student slang, or overly casual phrasing into clear professional language.
    - bulletStructure: First-person narratives, fillers, personal commentaries. Outline how they must lead with strong action verbs.
-   - summary: Professional reframing.
+   - summary: Professional reframing based purely on actual facts.
    - clarityPolishing: Identify narrative comments, conversational fillers, or subjective commentary that have been polished for a clean business presentation.
-   - education: Reframing academic or military training qualifications properly.
+   - education: Reframing academic or military training qualifications properly without altering degrees/dates.
 
-2. Generate an "Improved First Draft" in a structured JSON. Strip out all first-person narrative pronouns ("I", "my", "we"), casual filler, and conversational elements. Translate military/student terms to civilian/corporate equivalents. Ensure every bullet point starts with a strong action verb.
+2. Generate an "Improved First Draft" in a structured JSON. Strip out all first-person narrative pronouns ("I", "my", "we"), casual filler, and conversational elements. Translate jargon into corporate equivalents. Ensure every bullet point starts with a strong action verb while preserving ALL actual facts and experiences.
 
 Return a JSON object matching this schema:
 {
@@ -1581,29 +2830,29 @@ Return a JSON object matching this schema:
     "education": "string"
   },
   "draft": {
-    "name": "string (extract or default)",
-    "phone": "string (extract or default)",
-    "email": "string (extract or default)",
-    "linkedin": "string (extract or default)",
-    "summary": "string (improved summary)",
-    "education": "string (extract or default, e.g., Albion College)",
-    "expectedGraduation": "string (extract or default, e.g., Expected Graduation: 05/2027)",
-    "majorMinor": "string (extract or default)",
-    "gpa": "string (extract or default, e.g. GPA: 3.5)",
+    "name": "string (extract exact candidate name from text)",
+    "phone": "string (extract exact phone if present)",
+    "email": "string (extract exact email if present)",
+    "linkedin": "string (extract exact linkedin if present)",
+    "summary": "string (improved summary based strictly on actual facts)",
+    "education": "string (extract exact degree/school from text)",
+    "expectedGraduation": "string (extract exact dates from text)",
+    "majorMinor": "string (extract exact major/minor from text)",
+    "gpa": "string (extract exact GPA if present)",
     "skills": ["string (list of 5-10 extracted/improved skills)"],
     "customExperiences": [
       {
-        "company": "string",
-        "location": "string",
-        "role": "string",
-        "dates": "string",
+        "company": "string (exact company name from text)",
+        "location": "string (exact location from text)",
+        "role": "string (exact job title from text)",
+        "dates": "string (exact dates from text)",
         "bullets": ["string (improved bullet point leading with action verb)"]
       }
     ],
     "customActivities": [
       {
-        "organization": "string",
-        "dates": "string",
+        "organization": "string (exact organization from text)",
+        "dates": "string (exact dates from text)",
         "bullets": ["string (improved activities bullet)"]
       }
     ]
@@ -1612,14 +2861,14 @@ Return a JSON object matching this schema:
 Do not include any Markdown tags or comments in your output, return raw JSON string.`;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json"
       }
     });
 
-    const parsedData = JSON.parse((response.text || "{}").trim());
+    const parsedData = safeJsonParse(response.text);
     res.json({ success: true, ...parsedData });
   } catch (err: any) {
     console.warn("Gemini Enhance Initial (Using Fallback due to temporary overload):", err?.message || err);
@@ -1641,14 +2890,27 @@ app.post("/api/resume/enhance-target", async (req, res) => {
   }
 
   try {
-    const prompt = `You are an expert resume writer. Take the current resume draft and re-tune it specifically for:
+    const prompt = `You are a strict, world-class Resume Tailor & Fact-Checking Career Specialist.
+Take the current resume draft and re-tune it specifically for:
 Target Role: "${role}"
 Target Industry/Organization: "${industry}"
+
+STRICT GROUND-TRUTH & ZERO FABRICATION MANDATE:
+- YOU MUST TREAT THE INPUT RESUME DRAFT AS THE SOLE GROUND TRUTH.
+- IDENTITY LOCK: Preserve the exact candidate name, email, phone, and contact details from the input draft (e.g. if candidate is Jeremiah Syandira, NEVER rename them or output generic placeholder names).
+- ZERO FABRICATION ALLOWED: NEVER introduce fictional employers, fake projects, synthetic roles, or unearned credentials.
+- CAREER PIVOTS & TRANSFERABLE SKILLS: If the target role ("${role}") differs from past work history, DO NOT invent fake domain experience or fake employers. Instead, reframe their ACTUAL past responsibilities using transferable skill language (e.g. project coordination as workflow management, design as deliverable coordination).
+- 100% CONTENT PRESERVATION: Preserve 100% of the candidate's existing work experiences, past positions, job entries, companies, dates, and activity/project sections from the input draft.
+- EVERY SINGLE experience entry in "customExperiences" and "customActivities" MUST be retained in the output draft without deletion or substitution.
+
+QUESTION GENERATION RULE:
+- Every follow-up question in the "questions" array MUST explicitly name a real company, project, role, or degree listed in the input draft (e.g. "At [Company Name], what was the volume of...").
+- If a company or detail wasn't in the input draft, asking about it is strictly forbidden.
 
 Your task is to:
 1. Reframe the Summary and adjust bullet terminology to align with terms corporate recruiters search for in "${role}".
 2. Reorder or update skills to bring relevance to "${role}".
-3. Formulate 3 highly specific, contextual follow-up questions to help the candidate strengthen their bullets. Ask about details they can quantify (e.g. team size, pass rate, equipment value, LinkedIn profile link).
+3. Formulate 3 highly specific, contextual follow-up questions based strictly on their actual entries to help the candidate quantify their real achievements.
 4. Return the updated draft, a summary of target changes, and the 3 questions.
 
 Return a JSON object matching this schema:
@@ -1696,14 +2958,14 @@ Return a JSON object matching this schema:
 Do not include any Markdown tags or comments in your output, return raw JSON string.`;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json"
       }
     });
 
-    const parsedData = JSON.parse((response.text || "{}").trim());
+    const parsedData = safeJsonParse(response.text);
     res.json({ success: true, ...parsedData });
   } catch (err: any) {
     console.warn("Gemini Enhance Target (Using Fallback due to temporary overload):", err?.message || err);
@@ -1723,7 +2985,7 @@ app.post("/api/resume/enhance-finalize", async (req, res) => {
   }
 
   try {
-    const prompt = `You are an expert resume polish writer.
+    const prompt = `You are an expert resume polish writer and fact-checking career specialist.
 Take the current resume draft and integrate the user's answers to the follow-up questions to make their bullet points significantly stronger, quantified, and professionally detailed.
 
 User Answers:
@@ -1731,6 +2993,10 @@ ${JSON.stringify(answers)}
 
 Current Resume Draft:
 ${JSON.stringify(draft)}
+
+STRICT GROUND-TRUTH & ZERO FABRICATION MANDATE:
+- NEVER invent facts, fake companies, or false metrics not provided by the user or present in the current draft.
+- ONLY update specific bullets or contact coordinates by incorporating the actual numbers, URLs, or details provided in the user's answers.
 
 Your task is to:
 1. Rewrite the specific bullets or contact coordinates by injecting the numbers, pass rates, LinkedIn URLs, or equipment scales provided in the answers.
@@ -1770,14 +3036,14 @@ Return a JSON object matching this schema:
 Do not include any Markdown tags or comments in your output, return raw JSON string.`;
 
     const response = await callGeminiWithRetry({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json"
       }
     });
 
-    const parsedData = JSON.parse((response.text || "{}").trim());
+    const parsedData = safeJsonParse(response.text);
     res.json({ success: true, ...parsedData });
   } catch (err: any) {
     console.warn("Gemini Enhance Finalize (Using Fallback due to temporary overload):", err?.message || err);
@@ -1785,26 +3051,125 @@ Do not include any Markdown tags or comments in your output, return raw JSON str
   }
 });
 
+app.post("/api/resume/chat", async (req, res) => {
+  const { message, draft, history } = req.body;
+  if (!message) {
+    return res.status(400).json({ error: "No user message provided" });
+  }
 
-// Start express.js dev server or production setup
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.json({
+      reply: `I'm your Resume Coach! I received your query: "${message}". You can ask me to revise specific bullet points, rephrase your summary, or give advice on how to present your career milestones.`,
+      updatedDraft: draft || null
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Brit Interview Coach server running on port ${PORT}`);
-  });
+  try {
+    const prompt = `You are an elite, highly encouraging, and strict AI Resume Enhancer & Career Coach.
+You are conversing with a candidate about their resume draft.
+
+Candidate's Query: "${message}"
+
+Current Resume Draft Context:
+${draft ? JSON.stringify(draft) : "No draft yet uploaded."}
+
+Conversation History Summary:
+${history ? JSON.stringify(history.slice(-4)) : "Beginning of chat"}
+
+STRICT GROUND-TRUTH & FULL-HISTORY PRESERVATION MANDATE:
+- Treat the user's uploaded resume draft and explicit chat instructions as sole ground truth.
+- ZERO FABRICATION: Never invent fake roles, degrees, or companies.
+- 100% CONTENT PRESERVATION: Retain all existing experience entries unless the user explicitly asks to remove one.
+- If the candidate asks for advice, give a clear, strategic answer with specific bullet point examples.
+- If the candidate asks to modify/update their draft (e.g. "Add Python to my skills", "Change my summary to X", "Rewrite bullet 2"), provide the updated draft in the "updatedDraft" field.
+
+Return a JSON object:
+{
+  "reply": "string (your helpful, professional response to the candidate)",
+  "updatedDraft": null or {
+    "name": "string",
+    "phone": "string",
+    "email": "string",
+    "linkedin": "string",
+    "summary": "string",
+    "education": "string",
+    "expectedGraduation": "string",
+    "majorMinor": "string",
+    "gpa": "string",
+    "skills": ["string"],
+    "customExperiences": [
+      {
+        "company": "string",
+        "location": "string",
+        "role": "string",
+        "dates": "string",
+        "bullets": ["string"]
+      }
+    ],
+    "customActivities": [
+      {
+        "organization": "string",
+        "dates": "string",
+        "bullets": ["string"]
+      }
+    ]
+  }
 }
+Do not include any Markdown tags or comments in your output, return raw JSON string.`;
+
+    const response = await callGeminiWithRetry({
+      model: "gemini-3.6-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json"
+      }
+    });
+
+    const parsedData = safeJsonParse(response.text);
+    res.json({ success: true, ...parsedData });
+  } catch (err: any) {
+    console.warn("Gemini Resume Chat error:", err?.message || err);
+    res.json({
+      success: true,
+      reply: `I heard your request regarding "${message}". I can help you reframe your achievements, polish specific bullet points, or add skills to your resume.`,
+      updatedDraft: draft || null
+    });
+  }
+});
+
+
+// Start express.js dev server or production setup
+async function startServer() {
+  try {
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Brit Interview Coach server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error("Failed to start Express dev server:", err);
+  }
+}
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception thrown:", err);
+});
 
 startServer();

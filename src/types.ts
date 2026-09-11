@@ -35,6 +35,7 @@ export interface ResumeInfo {
 }
 
 export type InterviewType = 
+  | 'medical_school'
   | 'internship'
   | 'research'
   | 'campus_job'
@@ -44,7 +45,7 @@ export type InterviewType =
   | 'technical'
   | 'general';
 
-export type DifficultyLevel = 'beginner' | 'standard' | 'challenging';
+export type DifficultyLevel = 'basic' | 'beginner' | 'standard' | 'challenging';
 
 export interface JobTarget {
   positionTitle: string;
@@ -70,8 +71,64 @@ export interface SpeakingStats {
 
 export interface QuestionFeedback {
   score: number; // 1-10
+  numericScore?: number; // 0-100 scale
   score5?: number; // 0-5 from the document rubric
   score5Explanation?: string; // Text rubric description
+  
+  // Universal v2.0 Schema
+  track_evaluated?: 'MEDICAL_SCHOOL' | 'STANDARD_JOB';
+  domain_classification?: string;
+  targeted_competencies?: string[];
+  overall_score?: number; // 0.0 to 5.0
+  score_breakdown?: {
+    claim_or_situation: number;
+    evidence_or_action: number;
+    insight_or_result: number;
+    red_flag_deduction: number;
+  };
+  // Progressive 3-Tier Hint System & Penalty Engine
+  hints_unlocked?: number;
+  raw_evaluation_score?: number;
+  penalty_points?: number;
+  max_score_cap?: number;
+  final_score?: number;
+  aamc_competency_id?: string;
+
+  // Objective Rubric & Custom Filler Word Calibration Engine
+  objective_rubric?: {
+    relevance_to_target: number; // 0-100
+    professional_register: number; // 0-100
+    clarity_conciseness: number; // 0-100
+    vocal_composure_pace: number; // 0-100
+  };
+  filler_analysis?: {
+    total_words: number;
+    total_fillers: number;
+    filler_density_pct: number;
+    filler_breakdown: { word: string; count: number }[];
+    custom_calibrated_words_used: string[];
+  };
+
+  feedback?: {
+    strengths: string[];
+    vulnerabilities: string[];
+    red_flag_alert: string | null;
+  };
+  recommended_rewrite?: string;
+
+  starChecklist?: {
+    situation: boolean;
+    task: boolean;
+    action: boolean;
+    result: boolean;
+  };
+  starChecklistFormatted?: string; // "S: ✓ | T: ✓ | A: ✓ | R: ✗"
+  keyTip?: string; // One actionable tip to improve
+  starBreakdown?: {
+    situationTaskScore: number; // 0 to 30
+    actionScore: number; // 0 to 40
+    resultScore: number; // 0 to 30
+  };
   strengths: string[];
   areasToImprove: string[];
   suggestedAnswer: string;
@@ -87,7 +144,21 @@ export interface QuestionFeedback {
 export interface InterviewQuestion {
   id: string;
   text: string;
-  category: 'behavioral' | 'technical' | 'resume-based' | 'company-fit' | 'general' | 'closing';
+  category: 'behavioral' | 'technical' | 'resume-based' | 'company-fit' | 'general' | 'closing' | 'mmi' | string;
+  scenario_id?: string;
+  title?: string;
+  aamc_competency_primary?: string;
+  aamc_competency_secondary?: string;
+  help_drawer_content?: {
+    competency_overview?: string;
+    underlying_dilemma?: string;
+    key_talking_points?: string[];
+  };
+  follow_up_probes?: string[];
+  timing?: {
+    prep_seconds?: number;
+    station_seconds?: number;
+  };
 }
 
 export interface InterviewSession {
@@ -100,6 +171,7 @@ export interface InterviewSession {
   userAnswers: { [questionId: string]: string };
   feedbacks: { [questionId: string]: QuestionFeedback };
   speakingStatsHistory: { [questionId: string]: SpeakingStats };
+  videoUrls?: { [questionId: string]: string };
   isCompleted: boolean;
   finalReport?: FinalReport;
   userId?: string;

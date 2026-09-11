@@ -5,6 +5,7 @@ interface NavbarProps {
   setCurrentTab: (tab: string) => void;
   userEmail: string | null;
   userName: string | null;
+  userPhoto?: string | null;
   onLogout: () => void;
   onLoginClick: () => void;
 }
@@ -14,6 +15,7 @@ export default function Navbar({
   setCurrentTab,
   userEmail,
   userName,
+  userPhoto,
   onLogout,
   onLoginClick,
 }: NavbarProps) {
@@ -80,13 +82,22 @@ export default function Navbar({
                     {userName || userEmail}
                   </span>
                 </div>
-                <div className="bg-albion-gold text-albion-purple-dark h-8 w-8 rounded-full flex items-center justify-center font-bold font-display text-sm border-2 border-white/40">
-                  {(userName || userEmail)[0].toUpperCase()}
-                </div>
+                {userPhoto ? (
+                  <img
+                    src={userPhoto}
+                    alt={userName || 'Student'}
+                    referrerPolicy="no-referrer"
+                    className="h-8 w-8 rounded-full border-2 border-albion-gold object-cover shadow-sm"
+                  />
+                ) : (
+                  <div className="bg-albion-gold text-albion-purple-dark h-8 w-8 rounded-full flex items-center justify-center font-bold font-display text-sm border-2 border-white/40">
+                    {(userName || userEmail)[0].toUpperCase()}
+                  </div>
+                )}
                 <button
                   id="btn-logout"
                   onClick={onLogout}
-                  className="bg-white/10 hover:bg-red-950/40 border border-white/15 text-purple-200 hover:text-red-200 p-2 rounded-lg transition-all duration-200"
+                  className="bg-white/10 hover:bg-red-950/40 border border-white/15 text-purple-200 hover:text-red-200 p-2 rounded-lg transition-all duration-200 cursor-pointer"
                   title="Sign Out"
                 >
                   <LogOut className="w-4 h-4" />
@@ -94,16 +105,13 @@ export default function Navbar({
               </div>
             ) : (
               <div className="flex items-center space-x-2.5">
-                <span className="hidden sm:inline bg-white/10 text-albion-gold text-[10px] font-bold font-mono tracking-widest uppercase px-2.5 py-1.5 rounded-full border border-white/15">
-                  Guest Mode
-                </span>
                 <button
                   id="btn-login-trigger"
                   onClick={onLoginClick}
-                  className="bg-albion-gold hover:bg-albion-gold-light text-albion-purple-dark px-4 py-2 rounded-lg text-sm font-bold shadow-md hover:shadow-lg transition-all duration-200 flex items-center space-x-1.5 cursor-pointer"
+                  className="bg-albion-gold hover:bg-albion-gold-light text-albion-purple-dark px-3.5 py-2 rounded-lg text-sm font-bold shadow-md hover:shadow-lg transition-all duration-200 flex items-center space-x-1.5 cursor-pointer"
                 >
                   <LogIn className="w-4 h-4" />
-                  <span>Connect Account</span>
+                  <span>Sign in with Google</span>
                 </button>
               </div>
             )}

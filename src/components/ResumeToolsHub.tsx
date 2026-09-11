@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, FileText, ArrowLeft, ChevronRight, Bot, Compass, CheckCircle } from 'lucide-react';
+import { Sparkles, FileText, ArrowLeft, ChevronRight, Bot, Clock, CheckCircle } from 'lucide-react';
 
 interface ResumeToolsHubProps {
   onSelectEnhancer: () => void;
@@ -31,81 +31,82 @@ export default function ResumeToolsHub({ onSelectEnhancer, onSelectBuilder, onBa
           Choose Your Path to an <span className="text-albion-purple">Elite CV</span>
         </h1>
         <p className="text-sm text-gray-500 leading-relaxed font-light">
-          Boost your hiring potential. Whether you want a conversational, guided overhaul of an existing draft or a classic, high-fidelity template builder, we have you covered.
+          Boost your hiring potential. Build a high-fidelity, ATS-optimized resume using our interactive template builder.
         </p>
       </div>
 
       {/* Grid Options */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-stretch">
-        {/* Card A: Conversational Resume Enhancer */}
-        <div className="glass-card-deep p-8 rounded-[32px] border border-emerald-100 bg-white/75 flex flex-col justify-between space-y-8 hover:shadow-lg transition duration-300 relative overflow-hidden group">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full blur-2xl opacity-60 -mr-8 -mt-8 group-hover:scale-110 transition duration-300"></div>
+        {/* Card A: Conversational Resume Enhancer (Hidden / Coming Soon for Version Update) */}
+        <div className="glass-card-deep p-8 rounded-[32px] border border-amber-200/70 bg-gradient-to-b from-amber-50/30 to-white flex flex-col justify-between space-y-8 relative overflow-hidden group">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-amber-200/20 rounded-full blur-2xl -mr-8 -mt-8"></div>
           
           <div className="space-y-6 relative">
             {/* Tag & Icon */}
             <div className="flex items-center justify-between">
-              <span className="bg-emerald-50 text-emerald-700 text-[10px] font-mono font-bold uppercase tracking-widest px-3 py-1 rounded-full border border-emerald-100">
-                RECOMMENDED • CONVERSATIONAL COACH
+              <span className="bg-amber-100 text-amber-900 text-[10px] font-mono font-bold uppercase tracking-widest px-3 py-1 rounded-full border border-amber-200/80 flex items-center gap-1.5 shadow-sm">
+                <Clock className="w-3 h-3 text-amber-600 animate-pulse" />
+                <span>COMING SOON • VERSION UPDATE</span>
               </span>
-              <div className="bg-emerald-500/10 h-12 w-12 rounded-2xl flex items-center justify-center text-emerald-600">
-                <Sparkles className="w-6 h-6 animate-pulse text-emerald-600" />
+              <div className="bg-amber-500/10 h-12 w-12 rounded-2xl flex items-center justify-center text-amber-600 border border-amber-200/50">
+                <Bot className="w-6 h-6 text-amber-600" />
               </div>
             </div>
 
             <div className="space-y-3">
-              <h2 className="text-2xl font-display font-extrabold text-gray-900 group-hover:text-emerald-700 transition duration-150">
-                Conversational Enhancer
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-2xl font-display font-extrabold text-gray-800">
+                  Conversational Enhancer
+                </h2>
+                <span className="bg-purple-100 text-albion-purple font-mono font-bold text-[10px] px-2 py-0.5 rounded-md uppercase">
+                  v2.0 Testing
+                </span>
+              </div>
               <p className="text-xs text-gray-500 leading-relaxed font-light">
-                Upload or paste any existing text (even military papers, basic outlines, or casual bullet points). Engage in a guided 3-stage dialogue with a supportive coach to translate jargon, inject quantitative metrics, and finalize an executive CV.
+                This feature is currently offline for internal quality testing and bug fixes in preparation for an upcoming version update.
               </p>
             </div>
 
-            {/* List of Benefits */}
-            <div className="space-y-3 pt-2">
-              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">How it works:</h3>
-              <ul className="space-y-2.5 text-xs text-gray-600">
+            {/* List of Benefits / Feature Preview */}
+            <div className="space-y-3 pt-2 bg-amber-50/40 p-4 rounded-2xl border border-amber-100">
+              <h3 className="text-xs font-bold text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                <span>Upcoming Feature Capabilities:</span>
+              </h3>
+              <ul className="space-y-2 text-xs text-gray-600">
                 <li className="flex items-start gap-2.5">
-                  <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                  <span><strong>Tone & Clarity Audit:</strong> Refines narrative phrasing, passive fillers, and casual expressions.</span>
+                  <CheckCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                  <span><strong>3-Stage Guided Dialogue:</strong> Interactive coaching to refine raw resume text.</span>
                 </li>
                 <li className="flex items-start gap-2.5">
-                  <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                  <span><strong>Audience Alignment:</strong> Restructures skills and summary for your specific target role.</span>
-                </li>
-                <li className="flex items-start gap-2.5">
-                  <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                  <span><strong>Quantitative Deep-dive:</strong> Asks supportive questions to uncover metrics recruiters look for.</span>
-                </li>
-                <li className="flex items-start gap-2.5">
-                  <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                  <span><strong>Instant Export:</strong> Directly download as Microsoft Word (.doc) or print pristine PDF.</span>
+                  <CheckCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                  <span><strong>Quantitative Metric Deep-dive:</strong> Automated prompt engine for bullet metrics.</span>
                 </li>
               </ul>
             </div>
           </div>
 
           <button
-            onClick={onSelectEnhancer}
-            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-2xl text-xs transition duration-150 shadow-md flex items-center justify-center gap-1.5 cursor-pointer relative z-10"
+            disabled
+            className="w-full bg-slate-100 border border-slate-200 text-slate-400 font-bold py-4 rounded-2xl text-xs flex items-center justify-center gap-2 cursor-not-allowed relative z-10 shadow-inner"
           >
-            <span>Launch Conversational Enhancer</span>
-            <ChevronRight className="w-4 h-4" />
+            <Clock className="w-4 h-4 text-amber-600" />
+            <span>Coming Soon in Next Release</span>
           </button>
         </div>
 
-        {/* Card B: Interactive Template Builder */}
-        <div className="glass-card-deep p-8 rounded-[32px] border border-purple-100 bg-white/75 flex flex-col justify-between space-y-8 hover:shadow-lg transition duration-300 relative overflow-hidden group">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-purple-50 rounded-full blur-2xl opacity-60 -mr-8 -mt-8 group-hover:scale-110 transition duration-300"></div>
+        {/* Card B: Interactive Template Builder (Active Primary Tool) */}
+        <div className="glass-card-deep p-8 rounded-[32px] border-2 border-purple-200 bg-white/90 flex flex-col justify-between space-y-8 hover:shadow-xl transition duration-300 relative overflow-hidden group shadow-md">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-purple-100 rounded-full blur-2xl opacity-70 -mr-8 -mt-8 group-hover:scale-110 transition duration-300"></div>
 
           <div className="space-y-6 relative">
             {/* Tag & Icon */}
             <div className="flex items-center justify-between">
-              <span className="bg-purple-50 text-albion-purple text-[10px] font-mono font-bold uppercase tracking-widest px-3 py-1 rounded-full border border-purple-100">
-                CLASSIC TEMPLATE • GUIDED BUILDER
+              <span className="bg-purple-100 text-albion-purple text-[10px] font-mono font-bold uppercase tracking-widest px-3 py-1 rounded-full border border-purple-200 shadow-sm">
+                PRIMARY TOOL • HARVARD TEMPLATE
               </span>
-              <div className="bg-purple-500/10 h-12 w-12 rounded-2xl flex items-center justify-center text-albion-purple">
-                <FileText className="w-6 h-6 text-albion-purple" />
+              <div className="bg-purple-600 text-white h-12 w-12 rounded-2xl flex items-center justify-center shadow-md">
+                <FileText className="w-6 h-6 text-albion-gold" />
               </div>
             </div>
 
@@ -132,7 +133,7 @@ export default function ResumeToolsHub({ onSelectEnhancer, onSelectBuilder, onBa
                 </li>
                 <li className="flex items-start gap-2.5">
                   <CheckCircle className="w-4 h-4 text-albion-purple shrink-0 mt-0.5" />
-                  <span><strong>Hot Reloading Canvas:</strong> Watch your Changes reflect immediately on a printable sheet.</span>
+                  <span><strong>Hot Reloading Canvas:</strong> Watch your changes reflect immediately on a printable sheet.</span>
                 </li>
                 <li className="flex items-start gap-2.5">
                   <CheckCircle className="w-4 h-4 text-albion-purple shrink-0 mt-0.5" />

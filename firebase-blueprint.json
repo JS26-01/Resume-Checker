@@ -250,6 +250,10 @@
         },
         "savedResume": {
           "$ref": "#/entities/ResumeInfo"
+        },
+        "completedQuestionIds": {
+          "type": "array",
+          "description": "Array of question and scenario IDs already completed by the candidate"
         }
       },
       "required": ["email", "name", "createdAt"]

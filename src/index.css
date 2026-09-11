@@ -85,3 +85,32 @@ h1, h2, h3, h4 {
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
+
+/* Print & PDF Export styles */
+.printable-diagnostic-wrapper, #final-report-board, .pdf-card {
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
+}
+
+.pdf-card, .glass-card, .glass-card-deep, .glass-card-dark, .break-inside-avoid {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  nav, footer, .no-print {
+    display: none !important;
+  }
+  #final-report-board {
+    box-shadow: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+  }
+}

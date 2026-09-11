@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import confetti from 'canvas-confetti';
 import { FinalReport, JobTarget, InterviewSession } from '../types';
+import { generateInterviewPdfReport } from '../utils/generateInterviewPdfReport';
 import { 
   Award, CheckCircle, TrendingUp, AlertTriangle, ArrowRight, 
   CornerDownRight, Heart, Sparkles, BookOpen, UserCheck, 
   ShieldAlert, CheckSquare, MessageSquare, ClipboardList,
   FileText, CheckCircle2, XCircle, AlertCircle, AlignLeft, BarChart3,
-  ListTodo, Briefcase, Zap, Info
+  ListTodo, Briefcase, Zap, Info, Video, Mic, Camera, Download,
+  Printer, Loader2
 } from 'lucide-react';
 
 interface FinalReportViewProps {
@@ -27,6 +29,27 @@ export default function FinalReportView({
   session 
 }: FinalReportViewProps) {
   const [activeReportTab, setActiveReportTab] = useState<'dashboard' | 'interview' | 'resume' | 'competencies'>('dashboard');
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [pdfToast, setPdfToast] = useState<string | null>(null);
+
+  const handleDownloadPdf = () => {
+    setIsExportingPdf(true);
+    try {
+      generateInterviewPdfReport({
+        report,
+        jobTarget,
+        session,
+      });
+
+      setPdfToast("PDF Report downloaded successfully!");
+      setTimeout(() => setPdfToast(null), 4000);
+    } catch (err) {
+      console.error("PDF export encountered an error, launching print fallback", err);
+      window.print();
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   useEffect(() => {
     // Fire beautiful celebration confetti
@@ -64,13 +87,19 @@ export default function FinalReportView({
     }
   }, []);
 
+  // Determine if this is a medical track candidate
+  const isMedicalTrack = jobTarget.interviewType === 'medical_school' || 
+    /med|doctor|physician|mmi|aamc|medical|hospital|clinic|pre-med|prehealth|surgery/i.test(jobTarget.positionTitle || '') || 
+    /med|doctor|physician|mmi|aamc|medical|hospital|clinic|pre-med|prehealth|surgery/i.test(jobTarget.companyName || '');
+
   // Retrieve scores
   const interviewScore = report.overallScore;
   const atsScore = report.atsResumeReport?.overallScore || 78;
-  const combinedScore = Math.round((interviewScore + atsScore) / 2);
+  const combinedScore = isMedicalTrack ? interviewScore : Math.round((interviewScore + atsScore) / 2);
 
   // Score-level badge styling
   const getScoreBadge = (score: number) => {
+    if (interviewScore === 0) return { text: 'Incomplete Session (Skipped)', hover: 'from-red-600 to-rose-700', textCol: 'text-red-700', bgCol: 'bg-red-50' };
     if (score >= 90) return { text: 'Distinguished Student', hover: 'from-green-500 to-emerald-600', textCol: 'text-emerald-700', bgCol: 'bg-emerald-50' };
     if (score >= 80) return { text: 'Proficient Candidate', hover: 'from-blue-500 to-indigo-600', textCol: 'text-indigo-700', bgCol: 'bg-indigo-50' };
     if (score >= 70) return { text: 'Developing Professional', hover: 'from-amber-500 to-orange-600', textCol: 'text-amber-700', bgCol: 'bg-amber-50' };
@@ -188,7 +217,24 @@ export default function FinalReportView({
   const evaluations = report.categoryEvaluations || defaultEvaluations;
 
   return (
-    <div className="space-y-8" id="final-report-board">
+    <div className="printable-diagnostic-wrapper w-full bg-slate-50 p-1 sm:p-3 rounded-3xl" id="printable-diagnostic-wrapper">
+      <div className="space-y-8 bg-white p-3 sm:p-6 rounded-3xl shadow-sm" id="final-report-board">
+      {/* Download Success Toast Notification */}
+      {pdfToast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-700 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center justify-between space-x-4 border border-emerald-500 animate-bounce no-print">
+          <div className="flex items-center space-x-2">
+            <CheckCircle className="w-5 h-5 text-emerald-200" />
+            <span className="text-xs font-bold font-sans">{pdfToast}</span>
+          </div>
+          <button
+            onClick={onRestart}
+            className="bg-white/20 hover:bg-white/30 text-white px-3 py-1 rounded-xl text-xs font-extrabold transition-all cursor-pointer underline"
+          >
+            Back to Coach
+          </button>
+        </div>
+      )}
+
       {/* Top Banner and Brand badge */}
       <div className="bg-gradient-to-br from-albion-purple via-purple-900 to-albion-purple-dark text-white rounded-3xl p-6 sm:p-10 shadow-xl relative overflow-hidden">
         <div className="absolute right-0 top-0 opacity-10 font-bold font-display text-[150px] leading-none select-none tracking-tight -mr-10">
@@ -196,13 +242,53 @@ export default function FinalReportView({
         </div>
         
         <div className="relative z-10 space-y-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="inline-flex items-center space-x-2 bg-albion-gold text-albion-purple-dark px-3 py-1.5 rounded-full text-xs font-black font-display tracking-wide uppercase shadow-md">
-              <Sparkles className="w-3.5 h-3.5 animate-pulse text-albion-purple" />
-              <span>Comprehensive Career Assessment</span>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="inline-flex items-center space-x-2 bg-albion-gold text-albion-purple-dark px-3 py-1.5 rounded-full text-xs font-black font-display tracking-wide uppercase shadow-md">
+                <Sparkles className="w-3.5 h-3.5 animate-pulse text-albion-purple" />
+                <span>Comprehensive Career Assessment</span>
+              </div>
+              <div className="bg-white/10 backdrop-blur-sm text-white border border-white/20 text-[11px] px-3 py-1 rounded-full font-semibold">
+                Target Position: <strong className="text-albion-gold">{jobTarget.positionTitle}</strong> at <strong>{jobTarget.companyName}</strong>
+              </div>
             </div>
-            <div className="bg-white/10 backdrop-blur-sm text-white border border-white/20 text-[11px] px-3 py-1 rounded-full font-semibold">
-              Target Position: <strong className="text-albion-gold">{jobTarget.positionTitle}</strong> at <strong>{jobTarget.companyName}</strong>
+
+            {/* Quick Export PDF Action Buttons in Header */}
+            <div className="flex flex-wrap items-center gap-2 no-print">
+              <button
+                onClick={onRestart}
+                className="bg-white/20 hover:bg-white/30 text-white font-extrabold px-3.5 py-2 rounded-xl text-xs shadow-md transition-all duration-200 flex items-center space-x-1.5 cursor-pointer border border-white/30"
+                title="Return to Brit Interview Coach"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-albion-gold" />
+                <span>Return to Brit Interview Coach</span>
+              </button>
+              <button
+                id="btn-download-pdf-report"
+                onClick={handleDownloadPdf}
+                disabled={isExportingPdf}
+                className="bg-albion-gold hover:bg-albion-gold-light text-albion-purple-dark font-extrabold px-4 py-2 rounded-xl text-xs shadow-lg hover:shadow-xl transition-all duration-200 flex items-center space-x-2 cursor-pointer disabled:opacity-60"
+              >
+                {isExportingPdf ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Generating PDF...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    <span>Download PDF Report</span>
+                  </>
+                )}
+              </button>
+              <button
+                onClick={() => window.print()}
+                className="bg-white/15 hover:bg-white/25 text-white border border-white/25 font-bold px-3 py-2 rounded-xl text-xs transition-all duration-200 flex items-center space-x-1.5 cursor-pointer"
+                title="Print or Save as PDF"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Print</span>
+              </button>
             </div>
           </div>
 
@@ -212,14 +298,22 @@ export default function FinalReportView({
                 Your Complete Career Readiness Report
               </h1>
               <p className="text-purple-100 text-sm max-w-2xl leading-relaxed">
-                Excellent progression, Brit! Below is your unified assessment diagnostic. We've compiled your <strong>Mock Interview Performance</strong> along with your <strong>Resume ATS Compatibility Audit</strong> to give you a definitive indicator of your real-world hiring potential.
+                {interviewScore === 0 ? (
+                  <><strong>Notice:</strong> All question stations in this mock interview session were skipped. As a result, your Interview Performance score is <strong>0 / 100</strong>. Attempt practice questions in your next round to earn AI coaching feedback and interview points!</>
+                ) : isMedicalTrack ? (
+                  <>Below is your medical school interview diagnostic. We've compiled your <strong>Mock Interview Performance</strong> across AAMC core competencies and MMI scenario responses to give you a definitive indicator of your admissions interview readiness.</>
+                ) : (
+                  <>Below is your unified assessment diagnostic. We've compiled your <strong>Mock Interview Performance</strong> along with your <strong>Resume ATS Compatibility Audit</strong> to give you a definitive indicator of your real-world hiring potential.</>
+                )}
               </p>
             </div>
 
             {/* Huge Summarized Overall Score Dial */}
             <div className="lg:col-span-5 flex flex-col sm:flex-row items-center justify-center bg-white/10 backdrop-blur-md p-6 rounded-2xl border border-white/20 shadow-md gap-6">
               <div className="text-center sm:text-left space-y-1">
-                <span className="text-[10px] text-purple-200 tracking-wider font-mono uppercase block">Combined Career Readiness</span>
+                <span className="text-[10px] text-purple-200 tracking-wider font-mono uppercase block">
+                  {isMedicalTrack ? "Medical School Interview Readiness" : "Combined Career Readiness"}
+                </span>
                 <div className="text-5xl font-black font-display text-albion-gold leading-none tracking-tighter">
                   {combinedScore}
                   <span className="text-lg text-white">/100</span>
@@ -239,13 +333,15 @@ export default function FinalReportView({
                   </span>
                   <strong className="text-white font-mono text-[13px]">{interviewScore}/100</strong>
                 </div>
-                <div className="flex items-center justify-between gap-4">
-                  <span className="flex items-center gap-1.5 font-mono text-[11px]">
-                    <FileText className="w-3.5 h-3.5 text-albion-gold shrink-0" />
-                    Resume ATS Coach Score:
-                  </span>
-                  <strong className="text-white font-mono text-[13px]">{atsScore}/100</strong>
-                </div>
+                {!isMedicalTrack && (
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 font-mono text-[11px]">
+                      <FileText className="w-3.5 h-3.5 text-albion-gold shrink-0" />
+                      Resume ATS Coach Score:
+                    </span>
+                    <strong className="text-white font-mono text-[13px]">{atsScore}/100</strong>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -256,9 +352,6 @@ export default function FinalReportView({
       {isGuest && (
         <div className="bg-gradient-to-r from-amber-500/10 to-[#49266F]/10 border border-[#f2c057]/40 rounded-[32px] p-6 flex flex-col md:flex-row items-center justify-between gap-6 relative overflow-hidden backdrop-blur-sm shadow-sm animate-scale-up">
           <div className="space-y-1.5 max-w-2xl">
-            <div className="bg-[#f2c057]/15 text-[#a37612] font-bold text-[10px] uppercase px-2.5 py-0.5 rounded-full w-max border border-[#f2c057]/20 tracking-wider">
-              Guest Mode Active
-            </div>
             <h4 className="text-base font-extrabold text-[#49266F]">
               Your Career Assessment results are temporary!
             </h4>
@@ -277,51 +370,73 @@ export default function FinalReportView({
       )}
 
       {/* Primary Navigation Tabs for Assessment Sections */}
-      <div className="flex border-b border-gray-200 gap-1 overflow-x-auto pb-px">
-        <button
-          onClick={() => setActiveReportTab('dashboard')}
-          className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
-            activeReportTab === 'dashboard'
-              ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
-              : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
-          }`}
-        >
-          <Award className="w-4 h-4" />
-          <span>Combined Readiness Dashboard</span>
-        </button>
-        <button
-          onClick={() => setActiveReportTab('interview')}
-          className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
-            activeReportTab === 'interview'
-              ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
-              : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
-          }`}
-        >
-          <MessageSquare className="w-4 h-4" />
-          <span>Interview Performance Audit ({interviewScore}%)</span>
-        </button>
-        <button
-          onClick={() => setActiveReportTab('resume')}
-          className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
-            activeReportTab === 'resume'
-              ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
-              : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
-          }`}
-        >
-          <FileText className="w-4 h-4" />
-          <span>ATS Resume Coach Report ({atsScore}%)</span>
-        </button>
-        <button
-          onClick={() => setActiveReportTab('competencies')}
-          className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
-            activeReportTab === 'competencies'
-              ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
-              : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
-          }`}
-        >
-          <ClipboardList className="w-4 h-4" />
-          <span>Core Competencies Rubric (10 Categories)</span>
-        </button>
+      <div className="flex border-b border-gray-200 gap-1 overflow-x-auto pb-px justify-between items-center">
+        <div className="flex gap-1 overflow-x-auto">
+          <button
+            onClick={() => setActiveReportTab('dashboard')}
+            className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
+              activeReportTab === 'dashboard'
+                ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
+                : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
+            }`}
+          >
+            <Award className="w-4 h-4" />
+            <span>{isMedicalTrack ? "Medical Readiness Dashboard" : "Combined Readiness Dashboard"}</span>
+          </button>
+          <button
+            onClick={() => setActiveReportTab('interview')}
+            className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
+              activeReportTab === 'interview'
+                ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
+                : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
+            }`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>Interview Performance Audit ({interviewScore}%)</span>
+          </button>
+          {!isMedicalTrack && (
+            <button
+              onClick={() => setActiveReportTab('resume')}
+              className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
+                activeReportTab === 'resume'
+                  ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
+                  : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              <span>ATS Resume Coach Report ({atsScore}%)</span>
+            </button>
+          )}
+          <button
+            onClick={() => setActiveReportTab('competencies')}
+            className={`flex items-center gap-2 px-5 py-3 border-b-2 font-display text-xs font-bold tracking-wide transition duration-150 whitespace-nowrap uppercase cursor-pointer ${
+              activeReportTab === 'competencies'
+                ? 'border-albion-purple text-albion-purple bg-purple-50/40 rounded-t-xl'
+                : 'border-transparent text-gray-400 hover:text-gray-700 hover:border-gray-200'
+            }`}
+          >
+            <ClipboardList className="w-4 h-4" />
+            <span>
+              {isMedicalTrack ? 'AAMC Core Competencies Rubric' : 'Core Candidate Competencies Rubric'}
+            </span>
+          </button>
+        </div>
+
+        <div className="hidden md:flex items-center gap-2 shrink-0 no-print pb-2">
+          <button
+            id="btn-download-pdf-tabbar"
+            onClick={handleDownloadPdf}
+            disabled={isExportingPdf}
+            className="bg-albion-purple hover:bg-albion-purple-light text-white font-bold px-3.5 py-1.5 rounded-xl text-xs transition-all duration-150 flex items-center space-x-1.5 shadow-sm cursor-pointer disabled:opacity-60"
+          >
+            {isExportingPdf ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Download className="w-3.5 h-3.5 text-albion-gold" />
+            )}
+            <span>Download PDF Report</span>
+          </button>
+        </div>
       </div>
 
       {/* --- TAB 1: COMBINED READY DASHBOARD --- */}
@@ -332,7 +447,11 @@ export default function FinalReportView({
             {[
               { label: 'Communication Flow', score: report.communicationScore, desc: 'Vocabulary and rhythm' },
               { label: 'Content Quality', score: report.contentQualityScore, desc: 'Detail and structures' },
-              { label: 'Resume Alignment', score: report.resumeAlignmentScore, desc: 'Weaving in credentials' },
+              { 
+                label: isMedicalTrack ? 'AAMC Competencies' : 'Resume Alignment', 
+                score: report.resumeAlignmentScore, 
+                desc: isMedicalTrack ? 'Bioethics & clinical focus' : 'Weaving in credentials' 
+              },
               { label: 'Confidence & Posture', score: report.confidenceClarityScore, desc: 'Speaking assurance' },
             ].map((item, idx) => (
               <div key={idx} className="glass-card p-5 rounded-[24px] flex flex-col justify-between h-32 border border-purple-100">
@@ -372,20 +491,35 @@ export default function FinalReportView({
               </div>
             </div>
 
-            <div className="bg-purple-50/50 p-5 rounded-2xl border border-purple-100 flex items-start gap-4">
-              <div className="bg-albion-purple text-white p-2.5 rounded-xl shrink-0">
-                <FileText className="w-5 h-5 text-albion-gold" />
+            {isMedicalTrack ? (
+              <div className="bg-purple-50/50 p-5 rounded-2xl border border-purple-100 flex items-start gap-4">
+                <div className="bg-albion-purple text-white p-2.5 rounded-xl shrink-0">
+                  <BookOpen className="w-5 h-5 text-albion-gold" />
+                </div>
+                <div className="space-y-1">
+                  <span className="text-[10px] font-mono text-gray-400 uppercase tracking-widest block">Medical Track Focus</span>
+                  <h4 className="text-sm font-bold text-gray-800">AMCAS / MMI Alignment</h4>
+                  <p className="text-xs text-gray-455 leading-relaxed">
+                    Evaluated across AAMC Core Competencies, bioethics principles, and MMI station prompts.
+                  </p>
+                </div>
               </div>
-              <div className="space-y-1">
-                <span className="text-[10px] font-mono text-gray-400 uppercase tracking-widest block">Resume Score card</span>
-                <h4 className="text-sm font-bold text-gray-800">ATS Compatibility: {atsScore}%</h4>
-                <p className="text-xs text-gray-455 leading-relaxed">
-                  {atsData.optimizationAreas && atsData.optimizationAreas.length > 0 
-                    ? `Detected ${atsData.optimizationAreas.length} high-impact layout optimization areas. Check the ATS tab to align your format.`
-                    : "Outstanding linear, horizontal layout with excellent scanner compatibility!"}
-                </p>
+            ) : (
+              <div className="bg-purple-50/50 p-5 rounded-2xl border border-purple-100 flex items-start gap-4">
+                <div className="bg-albion-purple text-white p-2.5 rounded-xl shrink-0">
+                  <FileText className="w-5 h-5 text-albion-gold" />
+                </div>
+                <div className="space-y-1">
+                  <span className="text-[10px] font-mono text-gray-400 uppercase tracking-widest block">Resume Score Card</span>
+                  <h4 className="text-sm font-bold text-gray-800">ATS Compatibility: {atsScore}%</h4>
+                  <p className="text-xs text-gray-455 leading-relaxed">
+                    {atsData.optimizationAreas && atsData.optimizationAreas.length > 0 
+                      ? `Detected ${atsData.optimizationAreas.length} high-impact layout optimization areas. Check the ATS tab to align your format.`
+                      : "Outstanding linear, horizontal layout with excellent scanner compatibility!"}
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="bg-purple-50/50 p-5 rounded-2xl border border-purple-100 flex items-start gap-4">
               <div className="bg-albion-purple text-white p-2.5 rounded-xl shrink-0">
@@ -565,6 +699,7 @@ export default function FinalReportView({
                 {session.questions.map((question, index) => {
                   const answer = session.userAnswers[question.id] || "No response provided.";
                   const feedback = session.feedbacks[question.id];
+                  const videoUrl = session.videoUrls?.[question.id];
 
                   if (!feedback) return null;
 
@@ -598,10 +733,42 @@ export default function FinalReportView({
                         </div>
                       </div>
 
-                      {/* Student Answer */}
-                      <div className="bg-gray-50/70 rounded-xl p-4 border border-gray-100 space-y-1.5">
-                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block">Your Response Transcript:</span>
-                        <p className="text-xs text-gray-655 leading-relaxed font-sans font-medium whitespace-pre-wrap italic">
+                      {/* Video Playback Visual Aid (If recorded) */}
+                      {videoUrl ? (
+                        <div className="bg-slate-900 rounded-2xl p-4 border border-purple-800 space-y-3">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5 font-mono uppercase tracking-wider">
+                              <Video className="w-4 h-4 text-amber-400" /> Recorded Video Response (Self-Reflection Aid)
+                            </span>
+                            <span className="text-[10px] text-purple-200 bg-purple-950 px-2.5 py-0.5 rounded-full border border-purple-700 font-mono font-bold">
+                              🔒 Visual Data Excluded From Scoring
+                            </span>
+                          </div>
+                          <video src={videoUrl} controls className="w-full max-h-72 rounded-xl object-contain bg-black shadow-lg" />
+                          <p className="text-[10px] text-purple-300/80 leading-relaxed">
+                            * Use this video player to self-reflect on eye contact, posture, and pacing. In compliance with multimodal evaluation rules, zero visual metrics were analyzed.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="bg-purple-50/50 p-3 rounded-xl border border-purple-100 flex items-center justify-between text-xs text-purple-800">
+                          <span className="flex items-center gap-1.5 font-medium">
+                            <Mic className="w-4 h-4 text-purple-600" /> Mode Used: Audio Transcribe & Text Response
+                          </span>
+                          <span className="text-[10px] text-purple-500 font-mono">Audio-Only Capture</span>
+                        </div>
+                      )}
+
+                      {/* Generated Audio Speech-to-Text Transcript */}
+                      <div className="bg-gray-50/90 rounded-xl p-4 border border-gray-200 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold text-albion-purple uppercase tracking-widest block font-mono flex items-center gap-1">
+                            <Mic className="w-3 h-3 text-amber-500" /> Generated Audio Transcript (Speech-to-Text Basis)
+                          </span>
+                          <span className="text-[9px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-mono font-bold border border-emerald-200">
+                            Evaluated Audio Basis
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-700 leading-relaxed font-sans font-medium whitespace-pre-wrap italic bg-white p-3 rounded-lg border border-gray-100">
                           "{answer}"
                         </p>
                       </div>
@@ -902,10 +1069,12 @@ export default function FinalReportView({
           <div className="bg-gradient-to-br from-amber-500/10 via-purple-950/5 to-albion-purple/10 border border-albion-purple/20 rounded-[32px] p-6 sm:p-8 space-y-4">
             <h3 className="font-display font-extrabold text-lg text-albion-purple-dark flex items-center gap-2">
               <ClipboardList className="w-5.5 h-5.5 text-albion-purple shrink-0" />
-              Core Competencies Diagnostic Assessment
+              {jobTarget.interviewType === 'medical_school' ? 'AAMC Core Competencies Diagnostic Assessment' : 'Core Candidate Competencies Diagnostic Assessment'}
             </h3>
             <p className="text-xs text-gray-655 leading-relaxed max-w-4xl font-sans font-medium">
-              Based on the latest **Interview Scoring Research & STAR Methodology**, our coach assesses your performance across **10 distinct professional categories**. To achieve outstanding ratings, candidates are evaluated on their ability to structure real-world experiences, provide quantitative results, demonstrate organizational knowledge, and communicate with clarity.
+              {jobTarget.interviewType === 'medical_school'
+                ? "Based on the **AAMC Core Competencies & MMI Station Rubric**, our coach assesses your performance across **10 distinct professional categories**. Candidates are evaluated on ethical decision making, bioethical awareness, cultural sensitivity, active problem solving, and reflective reasoning."
+                : "Based on the **STAR Methodology & Corporate Hiring Benchmarks**, our coach assesses your performance across **10 distinct professional categories**. Candidates are evaluated on their ability to structure real-world experiences, provide quantitative results, demonstrate organizational knowledge, and communicate with clarity."}
             </p>
             
             {/* Quick explanation of 1-5 scale */}
@@ -1028,6 +1197,41 @@ export default function FinalReportView({
           </div>
         </div>
       )}
+      {/* Persistent Bottom Action Footer */}
+      <div className="bg-gradient-to-r from-purple-50 via-white to-amber-50/50 p-6 rounded-3xl border border-purple-100/80 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4 no-print mt-8">
+        <div className="space-y-1 text-center sm:text-left">
+          <h4 className="text-sm font-bold text-albion-purple">Save or Share Your Career Diagnostic</h4>
+          <p className="text-xs text-gray-600">Download a complete PDF copy of your assessment feedback and ATS resume audit to review offline or share with career advisors.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <button
+            id="btn-download-pdf-bottom"
+            onClick={handleDownloadPdf}
+            disabled={isExportingPdf}
+            className="bg-albion-purple hover:bg-albion-purple-light text-white font-bold px-5 py-2.5 rounded-2xl text-xs shadow-md transition-all duration-150 flex items-center space-x-2 cursor-pointer disabled:opacity-60"
+          >
+            {isExportingPdf ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Generating PDF...</span>
+              </>
+            ) : (
+              <>
+                <Download className="w-4 h-4 text-albion-gold" />
+                <span>Download PDF Report</span>
+              </>
+            )}
+          </button>
+          <button
+            onClick={onRestart}
+            className="bg-albion-purple hover:bg-albion-purple-light text-white font-extrabold px-5 py-2.5 rounded-2xl text-xs shadow-md transition-all duration-150 flex items-center space-x-2 cursor-pointer"
+          >
+            <Sparkles className="w-4 h-4 text-albion-gold" />
+            <span>Return to Brit Interview Coach</span>
+          </button>
+        </div>
+      </div>
     </div>
+  </div>
   );
 }

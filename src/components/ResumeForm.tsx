@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ResumeInfo, TemplateExperience, TemplateActivity } from '../types';
-import { UploadCloud, FileText, Send, CheckCircle2, AlertCircle, Edit3, Plus, Trash2, GraduationCap, Linkedin, Sparkles, Award, TrendingUp, XCircle, AlertTriangle, Info, Lightbulb, Zap, ThumbsUp, RefreshCw, Check, Printer } from 'lucide-react';
+import { UploadCloud, FileText, Send, CheckCircle2, AlertCircle, Edit3, Plus, Trash2, GraduationCap, Linkedin, Sparkles, Award, TrendingUp, XCircle, AlertTriangle, Info, Lightbulb, Zap, ThumbsUp, RefreshCw, Check, Printer, Clock } from 'lucide-react';
 import ResumeEnhancer from './ResumeEnhancer';
 import ResumeToolsHub from './ResumeToolsHub';
 
@@ -23,74 +23,100 @@ const loadPdfJs = (): Promise<any> => {
 };
 
 const extractTextFromPdf = async (file: File): Promise<string> => {
-  const pdfjsLib = await loadPdfJs();
-  const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-  const pdf = await loadingTask.promise;
-  let fullText = '';
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const items = textContent.items;
-    
-    // Group text items into lines based on Y-coordinate with a threshold tolerance
-    const linesMap: { [y: number]: any[] } = {};
-    const tolerance = 5; // tolerance in points/pixels for same-line alignment
-    
-    for (const item of items) {
-      if (!item || typeof item.str !== 'string') continue;
-      
-      const x = item.transform ? item.transform[4] : 0;
-      const y = item.transform ? item.transform[5] : 0;
-      const text = item.str;
-      
-      // Find if we already have a line close to this Y coordinate
-      let foundY = Object.keys(linesMap).map(Number).find(lineY => Math.abs(lineY - y) <= tolerance);
-      
-      if (foundY !== undefined) {
-        linesMap[foundY].push({ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform });
-      } else {
-        linesMap[y] = [{ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform }];
-      }
-    }
-    
-    // Sort lines descending (highest Y coordinate is at the top of the PDF page)
-    const sortedYKeys = Object.keys(linesMap)
-      .map(Number)
-      .sort((a, b) => b - a);
-      
-    let pageText = '';
-    for (const yKey of sortedYKeys) {
-      const lineItems = linesMap[yKey];
-      
-      // Sort items horizontally (left to right)
-      lineItems.sort((a, b) => a.x - b.x);
-      
-      let lineText = '';
-      let prevItem: any = null;
-      for (const item of lineItems) {
-        if (prevItem) {
-          // Estimate item width if not provided
-          const prevWidth = prevItem.width || (prevItem.transform && prevItem.transform[0] ? (prevItem.text.length * prevItem.transform[0] * 0.45) : (prevItem.text.length * 6));
-          const prevEnd = prevItem.x + prevWidth;
-          const gap = item.x - prevEnd;
-          
-          // Insert spacing if there's a visible horizontal gap and no existing space characters
-          if (gap > 2 && !prevItem.text.endsWith(' ') && !item.text.startsWith(' ')) {
-            lineText += ' ';
-          }
-        }
-        lineText += item.text;
-        prevItem = item;
-      }
-      
-      if (lineText.trim()) {
-        pageText += lineText + '\n';
-      }
-    }
-    fullText += pageText + '\n';
+  if (!file || file.size === 0) {
+    throw new Error('The selected PDF file is empty. Please select a valid document.');
   }
-  return fullText;
+
+  const arrayBuffer = await file.arrayBuffer();
+  if (!arrayBuffer || arrayBuffer.byteLength < 5) {
+    throw new Error('The uploaded file is too small to be a valid PDF document.');
+  }
+
+  // Validate PDF magic bytes (%PDF-)
+  const header = new Uint8Array(arrayBuffer.slice(0, 5));
+  const headerStr = String.fromCharCode(...header);
+  if (!headerStr.startsWith('%PDF-')) {
+    throw new Error('The uploaded file does not have a valid PDF header (%PDF-). Please upload a valid .pdf or .docx document.');
+  }
+
+  try {
+    const pdfjsLib = await loadPdfJs();
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(arrayBuffer),
+      stopAtErrors: false,
+    });
+    const pdf = await loadingTask.promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const items = textContent.items || [];
+      
+      // Group text items into lines based on Y-coordinate with a threshold tolerance
+      const linesMap: { [y: number]: any[] } = {};
+      const tolerance = 5; // tolerance in points/pixels for same-line alignment
+      
+      for (const item of items) {
+        if (!item || typeof item.str !== 'string') continue;
+        
+        const x = item.transform ? item.transform[4] : 0;
+        const y = item.transform ? item.transform[5] : 0;
+        const text = item.str;
+        
+        // Find if we already have a line close to this Y coordinate
+        let foundY = Object.keys(linesMap).map(Number).find(lineY => Math.abs(lineY - y) <= tolerance);
+        
+        if (foundY !== undefined) {
+          linesMap[foundY].push({ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform });
+        } else {
+          linesMap[y] = [{ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform }];
+        }
+      }
+      
+      // Sort lines descending (highest Y coordinate is at the top of the PDF page)
+      const sortedYKeys = Object.keys(linesMap)
+        .map(Number)
+        .sort((a, b) => b - a);
+        
+      let pageText = '';
+      for (const yKey of sortedYKeys) {
+        const lineItems = linesMap[yKey];
+        
+        // Sort items horizontally (left to right)
+        lineItems.sort((a, b) => a.x - b.x);
+        
+        let lineText = '';
+        let prevItem: any = null;
+        for (const item of lineItems) {
+          if (prevItem) {
+            // Estimate item width if not provided
+            const prevWidth = prevItem.width || (prevItem.transform && prevItem.transform[0] ? (prevItem.text.length * prevItem.transform[0] * 0.45) : (prevItem.text.length * 6));
+            const prevEnd = prevItem.x + prevWidth;
+            const gap = item.x - prevEnd;
+            
+            // Insert spacing if there's a visible horizontal gap and no existing space characters
+            if (gap > 2 && !prevItem.text.endsWith(' ') && !item.text.startsWith(' ')) {
+              lineText += ' ';
+            }
+          }
+          lineText += item.text;
+          prevItem = item;
+        }
+        
+        if (lineText.trim()) {
+          pageText += lineText + '\n';
+        }
+      }
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  } catch (err: any) {
+    console.warn('PDF extraction error:', err);
+    if (err?.message?.includes('Invalid PDF structure') || err?.name === 'InvalidPDFException') {
+      throw new Error('The uploaded PDF has an invalid structure or is corrupted. Please re-save or export your document as a standard PDF or Word document (.docx).');
+    }
+    throw new Error(err?.message || 'Failed to extract text from the PDF file.');
+  }
 };
 
 const loadMammoth = (): Promise<any> => {
@@ -1549,44 +1575,33 @@ export default function ResumeForm({ resumeInfo, onSaveResume, onStartMockInterv
             </div>
           </div>
 
-          {/* Option B: Connect to LinkedIn */}
-          <div className="lg:col-span-4 glass-card-deep rounded-[28px] p-6 flex flex-col justify-between space-y-6 relative overflow-hidden min-h-[380px]">
-            {isConnectingLinkedin && (
-              <div className="absolute inset-0 bg-white/95 rounded-[28px] flex flex-col items-center justify-center p-6 space-y-4 z-10 animate-fade-in">
-                <div className="relative">
-                  <div className="w-12 h-12 border-4 border-purple-100 border-t-albion-purple rounded-full animate-spin"></div>
-                  <Linkedin className="w-5 h-5 text-albion-purple absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
-                </div>
-                <div className="space-y-1 text-center">
-                  <h4 className="font-bold text-gray-800 text-sm">
-                    Connecting to LinkedIn...
-                  </h4>
-                  <p className="text-[10px] text-gray-500 max-w-xs">
-                    Please approve permissions in the popup to authorize resume generation.
-                  </p>
-                </div>
-              </div>
-            )}
-
+          {/* Option B: Connect to LinkedIn (Coming Soon) */}
+          <div className="lg:col-span-4 glass-card-deep rounded-[28px] p-6 flex flex-col justify-between space-y-6 relative overflow-hidden min-h-[380px] bg-slate-50/50 border border-slate-200/80">
             <div className="space-y-4">
-              <div className="bg-[#0077B5]/10 h-10 w-10 rounded-xl flex items-center justify-center text-[#0077B5]">
-                <Linkedin className="w-6 h-6" />
+              <div className="flex items-center justify-between">
+                <div className="bg-[#0077B5]/10 h-10 w-10 rounded-xl flex items-center justify-center text-[#0077B5]">
+                  <Linkedin className="w-6 h-6" />
+                </div>
+                <span className="bg-amber-100 text-amber-900 text-[10px] font-mono font-bold uppercase tracking-widest px-2.5 py-1 rounded-full border border-amber-200/80 flex items-center gap-1 shadow-sm">
+                  <Clock className="w-3 h-3 text-amber-600 animate-pulse" />
+                  <span>COMING SOON</span>
+                </span>
               </div>
               <h3 className="font-display font-bold text-base text-gray-800 leading-tight">
                 Import from LinkedIn
               </h3>
               <p className="text-xs text-gray-500 leading-relaxed">
-                Connect your LinkedIn.com profile to instantly extract your professional credentials, verified name, and accomplishments to bootstrap your coach!
+                LinkedIn profile import is currently offline and undergoing integration updates for future releases. Please upload a resume file or use our interactive builder.
               </p>
             </div>
 
             <button
+              disabled
               id="btn-connect-linkedin"
-              onClick={handleLinkedInConnect}
-              className="w-full bg-[#0077B5] hover:bg-[#005a8b] text-white font-bold py-3 rounded-xl text-center text-sm transition duration-150 cursor-pointer shadow-sm flex items-center justify-center gap-2"
+              className="w-full bg-slate-100 border border-slate-200 text-slate-400 font-bold py-3 rounded-xl text-center text-sm flex items-center justify-center gap-2 cursor-not-allowed shadow-inner"
             >
-              <Linkedin className="w-4 h-4 text-white" />
-              <span>Connect LinkedIn</span>
+              <Clock className="w-4 h-4 text-amber-600" />
+              <span>Coming Soon</span>
             </button>
           </div>
 
@@ -1600,7 +1615,7 @@ export default function ResumeForm({ resumeInfo, onSaveResume, onStartMockInterv
                 No Resume Ready?
               </h3>
               <p className="text-xs text-gray-500 leading-relaxed">
-                No problem, Albion! Instantly build a new CV, or launch our interactive Conversational Enhancer to optimize any existing text or draft.
+                No problem, Albion! Instantly build a polished CV using our Harvard-format Interactive Template Builder.
               </p>
             </div>
 
@@ -1610,7 +1625,7 @@ export default function ResumeForm({ resumeInfo, onSaveResume, onStartMockInterv
               className="w-full bg-albion-purple hover:bg-[#341b50] text-white font-bold py-3 rounded-xl text-center text-xs transition duration-150 cursor-pointer shadow-sm flex items-center justify-center gap-1.5"
             >
               <Sparkles className="w-4 h-4 text-albion-gold animate-pulse" />
-              <span>Interactive Resume Tools</span>
+              <span>Interactive Resume Builder</span>
             </button>
           </div>
         </div>

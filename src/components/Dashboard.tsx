@@ -142,7 +142,7 @@ export default function Dashboard({
               <div className="flex items-center space-x-2 text-[#49266F]">
                 <ShieldAlert className="w-5 h-5 shrink-0" />
                 <span>
-                  <strong>Guest Mode Active:</strong> Your sessions and resume drafts are saved transiently for this session, but will not persist if you close your browser. 
+                  <strong>Session Notice:</strong> Your sessions and resume drafts are saved for this session, but will not persist if you close your browser. 
                 </span>
               </div>
               <button

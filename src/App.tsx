@@ -6,10 +6,11 @@ import InterviewPreparer from './components/InterviewPreparer';
 import ActiveInterview from './components/ActiveInterview';
 import FinalReportView from './components/FinalReportView';
 import { ResumeInfo, JobTarget, InterviewSession, QuestionFeedback, SpeakingStats, FinalReport } from './types';
-import { Shield, Trash2, KeyRound, Sparkles, GraduationCap, ChevronRight, CheckCircle2, User, Mail, Award, LineChart } from 'lucide-react';
+import { Shield, Trash2, KeyRound, Sparkles, GraduationCap, ChevronRight, CheckCircle2, User, Mail, Award, LineChart, Stethoscope, Briefcase, LogIn, ExternalLink } from 'lucide-react';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc, getDocs, collection } from 'firebase/firestore';
+import { stopTtsAudio } from './utils/geminiTtsAudio';
 
 export default function App() {
   // Navigation
@@ -18,9 +19,10 @@ export default function App() {
   // Profile / Authentication
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userName, setUserName] = useState<string | null>(null);
+  const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [loginEmailInput, setLoginEmailInput] = useState('');
-  const [loginNameInput, setLoginNameInput] = useState('');
+  const [loginEmailInput, setLoginEmailInput] = useState('jsyandira4@gmail.com');
+  const [loginNameInput, setLoginNameInput] = useState('Brit Student');
 
   // Local Resume Info
   const [resumeInfo, setResumeInfo] = useState<ResumeInfo | null>(null);
@@ -30,10 +32,20 @@ export default function App() {
   const [activeSession, setActiveSession] = useState<InterviewSession | null>(null);
   const [selectedReportSession, setSelectedReportSession] = useState<InterviewSession | null>(null);
 
+  // Track modal state
+  const [showTrackModal, setShowTrackModal] = useState(false);
+  const [initialInterviewTrack, setInitialInterviewTrack] = useState<'regular' | 'medical_school'>('regular');
+
   // Status flags
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [unauthorizedDomain, setUnauthorizedDomain] = useState<string | null>(null);
+  const [authConfigNotFound, setAuthConfigNotFound] = useState(false);
+  const [copiedDomain, setCopiedDomain] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // local state
+  const [completedQuestionIds, setCompletedQuestionIds] = useState<string[]>([]);
 
   const isGuest = !auth.currentUser && !userEmail;
 
@@ -44,6 +56,13 @@ export default function App() {
     const savedName = localStorage.getItem('brit_user_name');
     const savedResume = localStorage.getItem('brit_resume_info');
     const savedSessions = localStorage.getItem('brit_sessions');
+    const savedCompletedQIds = localStorage.getItem('brit_completed_question_ids');
+
+    if (savedCompletedQIds) {
+      try {
+        setCompletedQuestionIds(JSON.parse(savedCompletedQIds));
+      } catch (e) {}
+    }
 
     if (savedEmail) {
       setUserEmail(savedEmail);
@@ -84,11 +103,23 @@ export default function App() {
       if (firebaseUser) {
         setUserEmail(firebaseUser.email);
         setUserName(firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Brit Student');
+        setUserPhoto(firebaseUser.photoURL || null);
         
         // Fetch User Profile from Firestore
         const userDocRef = doc(db, 'users', firebaseUser.uid);
         try {
           const userSnap = await getDoc(userDocRef);
+
+          if (userSnap.exists()) {
+            const userData = userSnap.data();
+            if (userData.completedQuestionIds && Array.isArray(userData.completedQuestionIds)) {
+              setCompletedQuestionIds(prev => {
+                const merged = Array.from(new Set([...prev, ...userData.completedQuestionIds]));
+                localStorage.setItem('brit_completed_question_ids', JSON.stringify(merged));
+                return merged;
+              });
+            }
+          }
           
           // Migrate Guest Resume transient state if present
           const guestResumeStr = sessionStorage.getItem('brit_resume_info_guest');
@@ -168,9 +199,10 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Protect Speech TTS against page/tab changes
+  // Stop Gemini TTS playback on tab changes
   useEffect(() => {
     if (currentTab !== 'active-interview') {
+      stopTtsAudio();
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -210,18 +242,50 @@ export default function App() {
   const handleGoogleLogin = async () => {
     setIsLoading(true);
     setErrorMsg(null);
+    setUnauthorizedDomain(null);
+    setAuthConfigNotFound(false);
     const provider = new GoogleAuthProvider();
     try {
       const result = await signInWithPopup(auth, provider);
       triggerToast(`Welcome, ${result.user.displayName || 'Brit Student'}! Synchronization ready.`);
       setShowAuthModal(false);
     } catch (err: any) {
-      console.error(err);
-      setErrorMsg(`Authentication failed: ${err.message}. Please connect with standard email guest profile instead.`);
-      triggerToast('Google authentication failed.');
+      console.warn('Google Sign-In notice:', err?.code || err?.message || err);
+      if (err?.code === 'auth/unauthorized-domain' || (err?.message && err.message.includes('auth/unauthorized-domain'))) {
+        const domain = window.location.hostname;
+        setUnauthorizedDomain(domain);
+        setErrorMsg(`Unauthorized Domain: "${domain}" is not authorized for Google Sign-In in Firebase Console.`);
+        triggerToast('Firebase Auth domain authorization required.');
+      } else if (err?.code === 'auth/configuration-not-found' || (err?.message && err.message.includes('auth/configuration-not-found'))) {
+        setAuthConfigNotFound(true);
+        setErrorMsg('Google Sign-In provider is not enabled in Firebase Console (or requires project owner permission).');
+        triggerToast('Google provider not configured in Firebase.');
+      } else if (err?.code === 'auth/popup-closed-by-user') {
+        // User closed popup without completing
+        setErrorMsg(null);
+      } else {
+        setErrorMsg(`Authentication notice: ${err?.message || 'Unknown error'}. You can sign in directly below.`);
+        triggerToast('Please sign in with your email profile below.');
+      }
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Instant Guest/Offline login handler
+  const handleInstantGuestLogin = () => {
+    const email = loginEmailInput.trim() || 'student@albion.edu';
+    const name = loginNameInput.trim() || 'Brit Student';
+
+    setUserEmail(email);
+    setUserName(name);
+    localStorage.setItem('brit_user_email', email);
+    localStorage.setItem('brit_user_name', name);
+
+    setShowAuthModal(false);
+    setErrorMsg(null);
+    setUnauthorizedDomain(null);
+    triggerToast(`Welcome, ${name}! Signed in with Guest Student profile.`);
   };
 
   // Simulated email Guest/Offline login handler
@@ -275,6 +339,7 @@ export default function App() {
     }
     setUserEmail(null);
     setUserName(null);
+    setUserPhoto(null);
     localStorage.removeItem('brit_user_email');
     localStorage.removeItem('brit_user_name');
     localStorage.removeItem('brit_resume_info');
@@ -317,12 +382,19 @@ export default function App() {
       setCurrentTab('resume');
       return;
     }
+    setShowTrackModal(true);
+  };
+
+  const handleSelectTrackAndProceed = (track: 'regular' | 'medical_school') => {
+    setInitialInterviewTrack(track);
+    setShowTrackModal(false);
     setCurrentTab('interview-preparer');
   };
 
   // Safe Exit during an ongoing interview
   const handleExitActiveInterview = () => {
     if (window.confirm('Are you sure you want to exit the mock interview? Your responses in this active round will not be saved.')) {
+      stopTtsAudio();
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -345,7 +417,8 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           resumeInfo,
-          jobTarget: target
+          jobTarget: target,
+          seenQuestionIds: completedQuestionIds
         }),
       });
 
@@ -420,7 +493,8 @@ export default function App() {
     answerText: string,
     feedback: QuestionFeedback,
     stats: SpeakingStats,
-    totalSpeakingSeconds?: number
+    totalSpeakingSeconds?: number,
+    videoUrl?: string
   ) => {
     if (!activeSession) return;
 
@@ -430,6 +504,9 @@ export default function App() {
     const updatedAnswers = { ...activeSession.userAnswers, [currentQ.id]: answerText };
     const updatedFeedbacks = { ...activeSession.feedbacks, [currentQ.id]: feedback };
     const updatedSpeaking = { ...activeSession.speakingStatsHistory, [currentQ.id]: stats };
+    const updatedVideoUrls = videoUrl 
+      ? { ...(activeSession.videoUrls || {}), [currentQ.id]: videoUrl }
+      : activeSession.videoUrls;
 
     const nextIndex = activeSession.currentQuestionIndex + 1;
     const isFinished = nextIndex >= activeSession.questions.length;
@@ -439,6 +516,7 @@ export default function App() {
       userAnswers: updatedAnswers,
       feedbacks: updatedFeedbacks,
       speakingStatsHistory: updatedSpeaking,
+      videoUrls: updatedVideoUrls,
       currentQuestionIndex: nextIndex,
       totalSpeakingSeconds: totalSpeakingSeconds ?? activeSession.totalSpeakingSeconds,
     };
@@ -489,13 +567,37 @@ export default function App() {
         if (!reportResponse.ok) throw new Error('Report synthesis failed');
 
         const reportData: FinalReport = await reportResponse.json();
+
+        // Client-side safeguard: Enforce zero score if all questions in session were skipped
+        const allUserAnswers = Object.values(updatedAnswers);
+        const nonSkippedAnswers = allUserAnswers.filter((ans: any) => {
+          const clean = String(ans || '').trim().toLowerCase();
+          return clean && clean !== '[skipped question]' && !clean.includes('skipped question');
+        });
+
+        if (nonSkippedAnswers.length === 0) {
+          reportData.overallScore = 0;
+          reportData.communicationScore = 0;
+          reportData.contentQualityScore = 0;
+          reportData.resumeAlignmentScore = 0;
+          reportData.confidenceClarityScore = 0;
+        }
+
         if (atsReportData) {
           reportData.atsResumeReport = atsReportData;
         }
         progressSession.finalReport = reportData;
         progressSession.isCompleted = true;
 
-        // Save Completed Session (Guests do not permanently save but let's allow saving in local history for premium preview UX)
+        // Extract answered question IDs to prevent duplicate questions in future sessions
+        const newCompletedIds = activeSession.questions.map(q => q.scenario_id || q.id).filter(Boolean);
+        setCompletedQuestionIds(prev => {
+          const merged = Array.from(new Set([...prev, ...newCompletedIds]));
+          localStorage.setItem('brit_completed_question_ids', JSON.stringify(merged));
+          return merged;
+        });
+
+        // Save Completed Session
         const updatedSessions = [...sessions, progressSession];
         setSessions(updatedSessions);
         
@@ -507,6 +609,7 @@ export default function App() {
 
         if (auth.currentUser) {
           const sessionDocRef = doc(db, "users", auth.currentUser.uid, "sessions", progressSession.id);
+          const userDocRef = doc(db, "users", auth.currentUser.uid);
           try {
             await updateDoc(sessionDocRef, {
               userAnswers: updatedAnswers,
@@ -516,6 +619,11 @@ export default function App() {
               isCompleted: true,
               finalReport: reportData,
               totalSpeakingSeconds: progressSession.totalSpeakingSeconds
+            });
+            // Update user profile completedQuestionIds array
+            const updatedCompletedIds = Array.from(new Set([...completedQuestionIds, ...newCompletedIds]));
+            await updateDoc(userDocRef, {
+              completedQuestionIds: updatedCompletedIds
             });
           } catch (fsErr) {
             handleFirestoreError(fsErr, OperationType.UPDATE, `users/${auth.currentUser.uid}/sessions/${progressSession.id}`);
@@ -676,6 +784,7 @@ export default function App() {
         setCurrentTab={setCurrentTab}
         userEmail={userEmail}
         userName={userName}
+        userPhoto={userPhoto}
         onLogout={handleLogout}
         onLoginClick={() => setShowAuthModal(true)}
       />
@@ -721,21 +830,115 @@ export default function App() {
               </div>
             )}
 
+            {/* Unauthorized Domain Helper Card */}
+            {unauthorizedDomain && (
+              <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 text-xs space-y-3 animate-fade-in">
+                <div className="flex items-start space-x-2 text-amber-950 font-bold">
+                  <Shield className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-extrabold text-xs uppercase tracking-wider text-amber-900">Firebase Domain Authorization Required</p>
+                    <p className="font-normal text-amber-800 mt-1 leading-relaxed">
+                      Google OAuth requires authorization for domain <strong className="font-mono bg-amber-100 px-1 py-0.5 rounded">{unauthorizedDomain}</strong> in Firebase Console (<em>Authentication &gt; Settings &gt; Authorized domains</em>).
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 bg-amber-100/80 p-2 rounded-xl border border-amber-200">
+                  <code className="flex-1 font-mono text-[11px] text-amber-950 truncate select-all">{unauthorizedDomain}</code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(unauthorizedDomain);
+                      setCopiedDomain(true);
+                      setTimeout(() => setCopiedDomain(false), 2000);
+                    }}
+                    className="bg-amber-800 hover:bg-amber-900 text-white font-bold text-[11px] px-2.5 py-1 rounded-lg shrink-0 transition cursor-pointer"
+                  >
+                    {copiedDomain ? '✓ Copied' : 'Copy Domain'}
+                  </button>
+                </div>
+
+                <div className="pt-2 border-t border-amber-200/80 flex items-center justify-between gap-2">
+                  <span className="text-amber-900 font-medium text-[11px]">Or start session without setup:</span>
+                  <button
+                    type="button"
+                    id="btn-instant-guest-login"
+                    onClick={handleInstantGuestLogin}
+                    className="bg-albion-purple hover:bg-albion-purple-light text-white font-bold text-[11px] px-3 py-1.5 rounded-xl shadow transition cursor-pointer shrink-0"
+                  >
+                    Start Practice Session →
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Google Provider Not Enabled in Firebase Console Helper */}
+            {authConfigNotFound && (
+              <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 text-xs space-y-3 animate-fade-in">
+                <div className="flex items-start space-x-2 text-amber-950 font-bold">
+                  <Shield className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-extrabold text-xs uppercase tracking-wider text-amber-900">Google OAuth Provider Not Enabled</p>
+                    <p className="font-normal text-amber-800 mt-1 leading-relaxed">
+                      Google Sign-In is not enabled yet in your Firebase project (or requires owner permissions). You can skip the setup and sign in directly with your email profile below!
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  id="btn-direct-email-signin"
+                  onClick={() => {
+                    const email = 'jsyandira4@gmail.com';
+                    const name = loginNameInput.trim() || 'Brit Student';
+                    setUserEmail(email);
+                    setUserName(name);
+                    localStorage.setItem('brit_user_email', email);
+                    localStorage.setItem('brit_user_name', name);
+                    setShowAuthModal(false);
+                    setErrorMsg(null);
+                    setAuthConfigNotFound(false);
+                    triggerToast(`Welcome, ${name}! Signed in as ${email}`);
+                  }}
+                  className="w-full flex items-center justify-center space-x-2 bg-albion-purple hover:bg-albion-purple-light text-white py-2.5 px-3 rounded-xl font-bold text-xs shadow-md transition cursor-pointer"
+                >
+                  <LogIn className="w-4 h-4 text-albion-gold" />
+                  <span>1-Click Sign In as jsyandira4@gmail.com</span>
+                </button>
+
+                <div className="bg-amber-100/70 p-2.5 rounded-xl text-[11px] text-amber-900 space-y-1">
+                  <p className="font-bold text-amber-950">To enable Google OAuth in Firebase Console:</p>
+                  <p className="text-amber-850">
+                    Switch to the Google account that owns the project &gt; Authentication &gt; Sign-in method &gt; Google &gt; Enable.
+                  </p>
+                  <a
+                    href="https://console.firebase.google.com/project/resume-checker-3e0d0/authentication/providers"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 font-bold text-albion-purple hover:text-albion-purple-dark underline pt-1"
+                  >
+                    <span>Open Firebase Console</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              </div>
+            )}
+
             {/* Google Authentication Section */}
             <div className="space-y-3 pt-1">
               <button
                 type="button"
                 id="btn-google-login"
                 onClick={handleGoogleLogin}
-                className="w-full flex items-center justify-center space-x-3 bg-albion-purple hover:bg-albion-purple-light text-white py-3 px-4 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition cursor-pointer"
+                className="w-full flex items-center justify-center space-x-3 bg-albion-purple hover:bg-albion-purple-light text-white py-3.5 px-4 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition cursor-pointer"
               >
-                <GraduationCap className="w-5 h-5 text-albion-gold shrink-0 animate-pulse" />
-                <span>Connect via Google Account</span>
+                <LogIn className="w-5 h-5 text-albion-gold shrink-0" />
+                <span>Sign in with Google</span>
               </button>
               
               <div className="flex items-center my-3 text-[10px] text-gray-400 font-bold uppercase tracking-wider justify-center">
                 <span className="border-t border-purple-100 w-full inline-block mr-3"></span>
-                <span>or offline guest profile</span>
+                <span>or sign in with email profile</span>
                 <span className="border-t border-purple-100 w-full inline-block ml-3"></span>
               </div>
             </div>
@@ -752,7 +955,7 @@ export default function App() {
                     required
                     value={loginNameInput}
                     onChange={(e) => setLoginNameInput(e.target.value)}
-                    placeholder="e.g. Samuel Briton"
+                    placeholder="e.g. Brit Student"
                     className="w-full pl-10 pr-4 py-2 text-sm bg-gray-50 rounded-xl border border-purple-100 focus:border-albion-purple focus:ring-1 focus:ring-albion-purple outline-none font-medium"
                   />
                 </div>
@@ -760,7 +963,7 @@ export default function App() {
 
               <div>
                 <label className="text-[10px] font-bold text-gray-450 uppercase tracking-wider block mb-1">
-                  Albion College Student Email
+                  Email Address
                 </label>
                 <div className="relative">
                   <Mail className="absolute left-3.5 top-2.5 w-4.5 h-4.5 text-gray-400" />
@@ -768,7 +971,7 @@ export default function App() {
                     type="email"
                     required
                     value={loginEmailInput}
-                    placeholder="student@albion.edu"
+                    placeholder="jsyandira4@gmail.com"
                     onChange={(e) => setLoginEmailInput(e.target.value)}
                     className="w-full pl-10 pr-4 py-2 text-sm bg-gray-50 rounded-xl border border-purple-100 focus:border-albion-purple focus:ring-1 focus:ring-albion-purple outline-none font-medium"
                   />
@@ -782,14 +985,14 @@ export default function App() {
                   onClick={() => setShowAuthModal(false)}
                   className="flex-1 border border-purple-150 py-2.5 rounded-xl text-xs font-semibold text-gray-500 hover:bg-gray-50 transition"
                 >
-                  Stay as Guest
+                  Close
                 </button>
                 <button
                   type="submit"
                   id="btn-auth-submit"
                   className="flex-1 bg-albion-gold hover:bg-albion-gold-light text-albion-purple-dark font-bold py-2.5 rounded-xl text-xs shadow-md transition"
                 >
-                  Create Guest
+                  Sign In with Profile
                 </button>
               </div>
             </form>
@@ -905,6 +1108,7 @@ export default function App() {
           <InterviewPreparer
             onStartPlanning={handleStartPlanningSession}
             isLoading={isLoading}
+            initialTrack={initialInterviewTrack}
           />
         )}
 
@@ -1019,6 +1223,87 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Track Selection Modal overlay */}
+      {showTrackModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in" id="track-modal-overlay">
+          <div className="bg-white rounded-[32px] p-6 sm:p-8 max-w-2xl w-full border border-purple-100 shadow-2xl space-y-6 animate-scale-up">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-4">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-widest text-albion-gold font-bold block">
+                  Select Mock Interview Track
+                </span>
+                <h3 className="text-xl font-bold font-display text-albion-purple-dark">
+                  Choose Your Interview Focus
+                </h3>
+              </div>
+              <button
+                id="btn-close-track-modal"
+                onClick={() => setShowTrackModal(false)}
+                className="text-gray-400 hover:text-gray-600 font-bold text-lg p-2 rounded-full hover:bg-gray-100 transition cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-500 leading-relaxed">
+              We tailor your mock questions, evaluation rubric, and assessor feedback based on whether you are applying for standard career roles or medical school admissions.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              {/* Card 1: Regular */}
+              <button
+                id="btn-modal-select-regular"
+                onClick={() => handleSelectTrackAndProceed('regular')}
+                className="p-5 rounded-2xl border-2 border-purple-100 hover:border-albion-purple bg-purple-50/50 hover:bg-purple-50 text-left transition-all duration-200 cursor-pointer space-y-3 group hover:shadow-lg hover:-translate-y-0.5"
+              >
+                <div className="bg-albion-purple text-white p-3 rounded-xl w-max group-hover:scale-110 transition-transform">
+                  <Briefcase className="w-6 h-6 text-albion-gold" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-albion-purple-dark block">Regular Interview</h4>
+                  <div className="flex items-center gap-1.5 my-2 flex-wrap">
+                    <span className="bg-purple-200/60 text-purple-900 text-[10px] font-bold px-2 py-0.5 rounded">STAR Method</span>
+                    <span className="bg-purple-200/60 text-purple-900 text-[10px] font-bold px-2 py-0.5 rounded">Corporate & Internship</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                    Designed for corporate roles, internships, and behavioral questions evaluated using the STAR method.
+                  </p>
+                </div>
+                <div className="text-xs font-bold text-albion-purple flex items-center gap-1 pt-1 group-hover:translate-x-1 transition-transform">
+                  <span>Start Regular Interview</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </div>
+              </button>
+
+              {/* Card 2: Medical School */}
+              <button
+                id="btn-modal-select-medical"
+                onClick={() => handleSelectTrackAndProceed('medical_school')}
+                className="p-5 rounded-2xl border-2 border-amber-200 hover:border-amber-500 bg-amber-50/40 hover:bg-amber-50 text-left transition-all duration-200 cursor-pointer space-y-3 group hover:shadow-lg hover:-translate-y-0.5"
+              >
+                <div className="bg-gradient-to-br from-[#49266F] to-[#2d1845] text-white p-3 rounded-xl w-max group-hover:scale-110 transition-transform">
+                  <Stethoscope className="w-6 h-6 text-albion-gold" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-albion-purple-dark block">Medical School Interview</h4>
+                  <div className="flex items-center gap-1.5 my-2 flex-wrap">
+                    <span className="bg-amber-200/70 text-amber-950 text-[10px] font-bold px-2 py-0.5 rounded">AAMC Core Competencies</span>
+                    <span className="bg-amber-200/70 text-amber-950 text-[10px] font-bold px-2 py-0.5 rounded">MMI Stations</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                    Designed for medical school admissions evaluated on AAMC Core Competencies and MMI scenarios.
+                  </p>
+                </div>
+                <div className="text-xs font-bold text-amber-700 flex items-center gap-1 pt-1 group-hover:translate-x-1 transition-transform">
+                  <span>Start Medical School Interview</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

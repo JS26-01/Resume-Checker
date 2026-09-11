@@ -1,10 +1,10 @@
 {
-  "projectId": "iconic-cooler-b6tp2",
-  "appId": "1:455233594450:web:979b28c5e95c8ed58a6b8b",
-  "apiKey": "AIzaSyDW2Rzhct-uie-gOWnoY3Qcp9OA39HtcU4",
-  "authDomain": "iconic-cooler-b6tp2.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-6875e39c-46d2-42fd-9d76-112f22e038dc",
-  "storageBucket": "iconic-cooler-b6tp2.firebasestorage.app",
-  "messagingSenderId": "455233594450",
-  "measurementId": ""
+  "projectId": "resume-checker-3e0d0",
+  "appId": "1:966540495190:web:ea971f6a715350d84feef7",
+  "apiKey": "AIzaSyAH-2Qdnz9B7wcsf_U27imrf_2ZEw4cDZ0",
+  "authDomain": "resume-checker-3e0d0.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "resume-checker-3e0d0.firebasestorage.app",
+  "messagingSenderId": "966540495190",
+  "measurementId": "G-7Z61JB0Q7Z"
 }

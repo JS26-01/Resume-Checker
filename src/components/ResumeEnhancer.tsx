@@ -25,59 +25,85 @@ const loadPdfJs = (): Promise<any> => {
 };
 
 const extractTextFromPdf = async (file: File): Promise<string> => {
-  const pdfjsLib = await loadPdfJs();
-  const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-  const pdf = await loadingTask.promise;
-  let fullText = '';
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const items = textContent.items;
-    
-    const linesMap: { [y: number]: any[] } = {};
-    const tolerance = 5;
-    
-    for (const item of items) {
-      if (!item || typeof item.str !== 'string') continue;
-      const x = item.transform ? item.transform[4] : 0;
-      const y = item.transform ? item.transform[5] : 0;
-      const text = item.str;
-      
-      let foundY = Object.keys(linesMap).map(Number).find(lineY => Math.abs(lineY - y) <= tolerance);
-      if (foundY !== undefined) {
-        linesMap[foundY].push({ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform });
-      } else {
-        linesMap[y] = [{ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform }];
-      }
-    }
-    
-    const sortedYKeys = Object.keys(linesMap).map(Number).sort((a, b) => b - a);
-    let pageText = '';
-    for (const yKey of sortedYKeys) {
-      const lineItems = linesMap[yKey];
-      lineItems.sort((a, b) => a.x - b.x);
-      let lineText = '';
-      let prevItem: any = null;
-      for (const item of lineItems) {
-        if (prevItem) {
-          const prevWidth = prevItem.width || (prevItem.transform && prevItem.transform[0] ? (prevItem.text.length * prevItem.transform[0] * 0.45) : (prevItem.text.length * 6));
-          const prevEnd = prevItem.x + prevWidth;
-          const gap = item.x - prevEnd;
-          if (gap > 2 && !prevItem.text.endsWith(' ') && !item.text.startsWith(' ')) {
-            lineText += ' ';
-          }
-        }
-        lineText += item.text;
-        prevItem = item;
-      }
-      if (lineText.trim()) {
-        pageText += lineText + '\n';
-      }
-    }
-    fullText += pageText + '\n';
+  if (!file || file.size === 0) {
+    throw new Error('The selected PDF file is empty. Please select a valid document.');
   }
-  return fullText;
+
+  const arrayBuffer = await file.arrayBuffer();
+  if (!arrayBuffer || arrayBuffer.byteLength < 5) {
+    throw new Error('The uploaded file is too small to be a valid PDF document.');
+  }
+
+  // Validate PDF magic bytes (%PDF-)
+  const header = new Uint8Array(arrayBuffer.slice(0, 5));
+  const headerStr = String.fromCharCode(...header);
+  if (!headerStr.startsWith('%PDF-')) {
+    throw new Error('The uploaded file does not have a valid PDF header (%PDF-). Please upload a valid .pdf or .docx document.');
+  }
+
+  try {
+    const pdfjsLib = await loadPdfJs();
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(arrayBuffer),
+      stopAtErrors: false,
+    });
+    const pdf = await loadingTask.promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const items = textContent.items || [];
+      
+      const linesMap: { [y: number]: any[] } = {};
+      const tolerance = 5;
+      
+      for (const item of items) {
+        if (!item || typeof item.str !== 'string') continue;
+        const x = item.transform ? item.transform[4] : 0;
+        const y = item.transform ? item.transform[5] : 0;
+        const text = item.str;
+        
+        let foundY = Object.keys(linesMap).map(Number).find(lineY => Math.abs(lineY - y) <= tolerance);
+        if (foundY !== undefined) {
+          linesMap[foundY].push({ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform });
+        } else {
+          linesMap[y] = [{ text, x, y, width: item.width || 0, height: item.height || 0, transform: item.transform }];
+        }
+      }
+      
+      const sortedYKeys = Object.keys(linesMap).map(Number).sort((a, b) => b - a);
+      let pageText = '';
+      for (const yKey of sortedYKeys) {
+        const lineItems = linesMap[yKey];
+        lineItems.sort((a, b) => a.x - b.x);
+        let lineText = '';
+        let prevItem: any = null;
+        for (const item of lineItems) {
+          if (prevItem) {
+            const prevWidth = prevItem.width || (prevItem.transform && prevItem.transform[0] ? (prevItem.text.length * prevItem.transform[0] * 0.45) : (prevItem.text.length * 6));
+            const prevEnd = prevItem.x + prevWidth;
+            const gap = item.x - prevEnd;
+            if (gap > 2 && !prevItem.text.endsWith(' ') && !item.text.startsWith(' ')) {
+              lineText += ' ';
+            }
+          }
+          lineText += item.text;
+          prevItem = item;
+        }
+        if (lineText.trim()) {
+          pageText += lineText + '\n';
+        }
+      }
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  } catch (err: any) {
+    console.warn('PDF extraction error in ResumeEnhancer:', err);
+    if (err?.message?.includes('Invalid PDF structure') || err?.name === 'InvalidPDFException') {
+      throw new Error('The uploaded PDF has an invalid structure or is corrupted. Please re-save or export your document as a standard PDF or Word document (.docx).');
+    }
+    throw new Error(err?.message || 'Failed to extract text from the PDF file.');
+  }
 };
 
 const loadMammoth = (): Promise<any> => {
@@ -138,8 +164,77 @@ export default function ResumeEnhancer({ onSaveAndClose, onBack, currentResume }
   const [activeDraft, setActiveDraft] = useState<any | null>(null);
   const [selectedRole, setSelectedRole] = useState('');
   const [selectedIndustry, setSelectedIndustry] = useState('');
+  const [customRoleInput, setCustomRoleInput] = useState('');
+  const [customIndustryInput, setCustomIndustryInput] = useState('');
   const [deepAnswers, setDeepAnswers] = useState<{ [key: number]: string }>({ 0: '', 1: '', 2: '' });
   const [finalResume, setFinalResume] = useState<any | null>(null);
+  const [chatInput, setChatInput] = useState('');
+
+  const handleSendChatMessage = async (presetText?: string) => {
+    const textToSend = presetText || chatInput;
+    if (!textToSend.trim() || isGenerating) return;
+    setChatInput('');
+    setIsGenerating(true);
+    setErrorMsg(null);
+
+    const userMsgId = `chat-user-${Date.now()}`;
+    setMessages(prev => [
+      ...prev,
+      {
+        id: userMsgId,
+        sender: 'user',
+        text: textToSend.trim(),
+        timestamp: new Date()
+      }
+    ]);
+
+    try {
+      const response = await fetch('/api/resume/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: textToSend.trim(),
+          draft: finalResume || activeDraft,
+          history: messages.map(m => ({ sender: m.sender, text: m.text }))
+        })
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+
+      if (data.updatedDraft) {
+        if (coachStep === 'final') {
+          setFinalResume(data.updatedDraft);
+        } else {
+          setActiveDraft(data.updatedDraft);
+        }
+      }
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `chat-coach-${Date.now()}`,
+          sender: 'coach',
+          text: data.reply || "I've processed your request.",
+          timestamp: new Date(),
+          type: data.updatedDraft ? 'analysis_report' : undefined,
+          data: data.updatedDraft ? { draft: data.updatedDraft } : undefined
+        }
+      ]);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error communicating with Resume Coach.');
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `chat-err-${Date.now()}`,
+          sender: 'coach',
+          text: `⚠️ **Coach Error:** ${err.message || 'Unable to process chat query.'}`,
+          timestamp: new Date()
+        }
+      ]);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -148,18 +243,54 @@ export default function ResumeEnhancer({ onSaveAndClose, onBack, currentResume }
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isGenerating]);
 
-  // Initial welcome message
+  // Initial welcome message & auto-load existing resume if real work experience entries exist
   useEffect(() => {
-    setMessages([
-      {
-        id: 'welcome',
-        sender: 'coach',
-        text: "Welcome, Albion! I am your interactive Resume Enhancer and Coach.\n\nMy mission is to help you translate, restructure, and polish your credentials into an elite, recruiter-ready, ATS-compliant CV. We'll strip narrative fillers, re-orient language for your target role, and deep-dive into your achievements with thoughtful questions.\n\nTo get started, please **upload your current resume file** (PDF/Word) or **paste your draft text** below.",
-        timestamp: new Date(),
-        type: 'intro'
-      }
-    ]);
-  }, []);
+    const hasExistingExperiences = Boolean(
+      currentResume &&
+      currentResume.customExperiences &&
+      currentResume.customExperiences.length > 0
+    );
+
+    if (hasExistingExperiences) {
+      const candidateName = currentResume.name && currentResume.name !== 'Student Name' ? currentResume.name : 'Candidate';
+      const initialDraft = {
+        name: currentResume.name || 'Candidate Name',
+        phone: currentResume.phone || '',
+        email: currentResume.email || '',
+        linkedin: currentResume.linkedin || '',
+        summary: currentResume.summary || '',
+        education: currentResume.education || 'Albion College',
+        expectedGraduation: currentResume.expectedGraduation || '',
+        majorMinor: currentResume.majorMinor || '',
+        gpa: currentResume.gpa || '',
+        skills: currentResume.skills || [],
+        customExperiences: currentResume.customExperiences || [],
+        customActivities: currentResume.customActivities || []
+      };
+      setActiveDraft(initialDraft);
+      setCoachStep('targeting_role');
+      setMessages([
+        {
+          id: 'welcome-loaded',
+          sender: 'coach',
+          text: `**Hello, ${candidateName}!** I am your Executive Resume Coach and Career Strategist.\n\nI have detected your active resume draft with **${initialDraft.customExperiences.length} work experience entries**.\n\nWe can continue tailoring this draft, or you can **upload a new resume file** / **paste new text** below to start fresh!\n\nIf you want to tailor your current draft, please select a target pathway below or type your target role, company, or industry in the chat box.`,
+          timestamp: new Date(),
+          type: 'analysis_report',
+          data: { draft: initialDraft }
+        }
+      ]);
+    } else {
+      setMessages([
+        {
+          id: 'welcome',
+          sender: 'coach',
+          text: "Hello! I am your Executive Resume Coach and Career Strategist.\n\nI am here to help you tailor and polish your resume step-by-step through a collaborative, conversational approach. I will not make any assumptions about missing experience or generate critiques until you explicitly provide your document or text.\n\nTo begin, please **upload your current resume file** (PDF/Word) or **paste your draft resume text** below.",
+          timestamp: new Date(),
+          type: 'intro'
+        }
+      ]);
+    }
+  }, [currentResume]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -254,16 +385,11 @@ export default function ResumeEnhancer({ onSaveAndClose, onBack, currentResume }
       setActiveDraft(data.draft);
       setCoachStep('analysis');
 
-      const isMilitary = /smudger|forces|army|navy|military|recruit|commander/i.test(text);
-      const greetingName = data.draft.name || 'Albion Student';
+      const greetingName = data.draft.name || 'Candidate';
 
       // Build initial audit chat bubble
       let coachFeedbackText = `**Awesome ${greetingName}! I've completed the initial translation and audit of your resume.**\n\n`;
-      if (isMilitary) {
-        coachFeedbackText += `Smudger, there's real experience buried in this resume — 4 tours, leadership under pressure, instructor roles — but the way it's written right now would stop a civilian recruiter cold before they got past the first line. There's meaningful work to do here, but that's exactly what I'm here for.\n\n`;
-      } else {
-        coachFeedbackText += `There's meaningful, high-impact background buried here, but we need to elevate the structure, remove narrative phrasing, and make it standard for modern recruiters. Here is exactly what I'm going to improve right now:\n\n`;
-      }
+      coachFeedbackText += `There's meaningful, high-impact background in your resume. We will elevate the structure, remove narrative phrasing, and make it standard for modern recruiters. Here is exactly what I'm going to improve right now:\n\n`;
 
       setMessages(prev => [
         ...prev,
@@ -364,15 +490,9 @@ export default function ResumeEnhancer({ onSaveAndClose, onBack, currentResume }
       setActiveDraft(data.draft);
       setCoachStep('deepening');
 
-      const isMilitary = /Smudger/i.test(data.draft.name);
-      let matchFeedback = `**Great — ${selectedRole} in a ${industryId} environment is a strong fit for your background.**\n\n`;
-      if (isMilitary) {
-        matchFeedback += `Your experience managing personnel, enforcing operational standards under pressure, and keeping equipment accountability across deployment maps directly onto what large private-sector employers look for in ops and logistics leaders.\n\n`;
-      } else {
-        matchFeedback += `Your background in projects, collaboration, and training aligns exceptionally well with what companies expect for this pathway.\n\n`;
-      }
-
-      matchFeedback += `Here's what I'm going to improve right now based on this target:`;
+      let matchFeedback = `**Great — targeting ${selectedRole} in a ${industryId} environment.**\n\n`;
+      matchFeedback += `We are reframing your existing background to highlight transferable skills, relevant terminology, and core achievements for this pathway.\n\n`;
+      matchFeedback += `Here is what I'm tailoring right now based on this target:`;
 
       setMessages(prev => [
         ...prev,
@@ -900,50 +1020,117 @@ export default function ResumeEnhancer({ onSaveAndClose, onBack, currentResume }
                   </div>
                 )}
 
-                {/* 2. TARGETING CARDS OPTIONS */}
+                {/* 2. TARGETING CARDS OPTIONS WITH OPEN CUSTOM INPUT */}
                 {msg.type === 'targeting_options' && (
-                  <div className="space-y-3 pl-1 w-full max-w-md animate-fade-in">
-                    {/* Role options list */}
+                  <div className="space-y-4 pl-1 w-full max-w-lg animate-fade-in">
+                    {/* Custom Role Input & Suggestion Chips */}
                     {coachStep === 'targeting_role' && (
-                      <div className="grid grid-cols-1 gap-2">
-                        {[
-                          { id: 'Operations / Logistics Management', label: 'Operations & Logistics' },
-                          { id: 'Project / Programme Management', label: 'Project & Program Management' },
-                          { id: 'Training, Coaching or L&D', label: 'Training, Coaching & L&D' },
-                          { id: 'Security or Risk Management', label: 'Security & Risk Management' },
-                          { id: 'Software Engineering / Tech', label: 'Software Engineering & Tech' },
-                          { id: 'Marketing & Business Analytics', label: 'Marketing & Business Analytics' }
-                        ].map((opt) => (
+                      <div className="bg-white border border-gray-300 p-4 rounded-2xl shadow-sm space-y-3">
+                        <label className="block text-xs font-bold text-gray-800">
+                          Type or search your target role / title:
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={customRoleInput}
+                            onChange={(e) => setCustomRoleInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && customRoleInput.trim()) {
+                                handleSelectRole(customRoleInput.trim());
+                              }
+                            }}
+                            placeholder="e.g. Healthcare Operations, Pre-Med Clinical Scribe, Financial Analyst..."
+                            className="flex-1 px-3.5 py-2.5 text-sm border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-purple-500 text-gray-900 bg-gray-50 font-medium"
+                          />
                           <button
-                            key={opt.id}
-                            onClick={() => handleSelectRole(opt.id)}
-                            className="w-full p-3.5 text-left rounded-xl text-sm font-bold transition flex items-center justify-between border border-gray-300 bg-white hover:border-emerald-600 hover:bg-emerald-50 text-gray-900 cursor-pointer shadow-sm"
+                            disabled={!customRoleInput.trim()}
+                            onClick={() => handleSelectRole(customRoleInput.trim())}
+                            className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white font-bold text-xs rounded-xl transition shadow-sm cursor-pointer shrink-0"
                           >
-                            <span>{opt.label}</span>
-                            <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
+                            Set Role
                           </button>
-                        ))}
+                        </div>
+
+                        {/* Quick Presets */}
+                        <div className="pt-2 border-t border-gray-150">
+                          <p className="text-[11px] font-bold text-gray-500 mb-2">Popular Career Pathways:</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {[
+                              'Healthcare & Clinical Medicine',
+                              'Operations & Supply Chain',
+                              'Project & Program Lead',
+                              'Software & Tech Innovation',
+                              'Marketing & Data Analytics',
+                              'Finance & Management Consulting'
+                            ].map((preset) => (
+                              <button
+                                key={preset}
+                                onClick={() => {
+                                  setCustomRoleInput(preset);
+                                  handleSelectRole(preset);
+                                }}
+                                className="px-2.5 py-1 text-xs font-semibold bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 rounded-lg transition cursor-pointer"
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     )}
 
-                    {/* Industry options list */}
+                    {/* Custom Industry Input & Suggestion Chips */}
                     {coachStep === 'targeting_industry' && (
-                      <div className="grid grid-cols-1 gap-2">
-                        {[
-                          { id: 'Corporate / Large Private Company', label: 'Corporate & Large Enterprise' },
-                          { id: 'Startups & Tech Ventures', label: 'Tech Startups & Ventures' },
-                          { id: 'Non-Profit & Public Sector', label: 'Government & Non-Profit' },
-                          { id: 'Academic & Lab Research', label: 'Academic & Lab Research' }
-                        ].map((opt) => (
+                      <div className="bg-white border border-gray-300 p-4 rounded-2xl shadow-sm space-y-3">
+                        <label className="block text-xs font-bold text-gray-800">
+                          Type or search your target industry / environment:
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={customIndustryInput}
+                            onChange={(e) => setCustomIndustryInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && customIndustryInput.trim()) {
+                                handleSelectIndustry(customIndustryInput.trim());
+                              }
+                            }}
+                            placeholder="e.g. Academic Medical Center, Biotech Venture, Public Policy NGO, Fortune 500..."
+                            className="flex-1 px-3.5 py-2.5 text-sm border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-purple-500 text-gray-900 bg-gray-50 font-medium"
+                          />
                           <button
-                            key={opt.id}
-                            onClick={() => handleSelectIndustry(opt.id)}
-                            className="w-full p-3.5 text-left rounded-xl text-sm font-bold transition flex items-center justify-between border border-gray-300 bg-white hover:border-emerald-600 hover:bg-emerald-50 text-gray-900 cursor-pointer shadow-sm"
+                            disabled={!customIndustryInput.trim()}
+                            onClick={() => handleSelectIndustry(customIndustryInput.trim())}
+                            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs rounded-xl transition shadow-sm cursor-pointer shrink-0"
                           >
-                            <span>{opt.label}</span>
-                            <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
+                            Set Industry
                           </button>
-                        ))}
+                        </div>
+
+                        {/* Quick Presets */}
+                        <div className="pt-2 border-t border-gray-150">
+                          <p className="text-[11px] font-bold text-gray-500 mb-2">Target Environment Presets:</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {[
+                              'Academic Medical Center & Hospital',
+                              'Corporate & Large Enterprise',
+                              'Tech Startup & Venture Capital',
+                              'Government & Non-Profit Public Sector',
+                              'Academic & Research Laboratory'
+                            ].map((preset) => (
+                              <button
+                                key={preset}
+                                onClick={() => {
+                                  setCustomIndustryInput(preset);
+                                  handleSelectIndustry(preset);
+                                }}
+                                className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-lg transition cursor-pointer"
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1285,33 +1472,64 @@ export default function ResumeEnhancer({ onSaveAndClose, onBack, currentResume }
               </button>
             </div>
           </div>
-        ) : coachStep === 'targeting_role' ? (
-          <div className="p-3 text-center text-sm text-gray-800 font-sans font-bold bg-gray-50 rounded-xl border border-gray-200">
-            💡 Select one of the career target pathways presented in the coach speech bubble above.
-          </div>
-        ) : coachStep === 'targeting_industry' ? (
-          <div className="p-3 text-center text-sm text-gray-800 font-sans font-bold bg-gray-50 rounded-xl border border-gray-200">
-            💡 Select your target business organization type in the prompt bubble above.
-          </div>
-        ) : coachStep === 'deepening' ? (
-          <div className="p-3 text-center text-sm text-gray-800 font-sans font-bold bg-gray-50 rounded-xl border border-gray-200">
-            💡 Fill out the quantitative detail fields inside the targeted preview card above to complete your resume.
-          </div>
         ) : (
-          <div className="p-3.5 bg-green-50 border border-green-200 rounded-xl flex items-center justify-between text-sm text-green-900 animate-fade-in font-bold">
-            <div className="flex items-center gap-1.5">
-              <CheckCircle2 className="w-4 h-4 text-green-700" />
-              <span>Executive Resume successfully finalized and formatted! Ready for download.</span>
+          <div className="space-y-3 animate-fade-in">
+            {/* Quick Prompt Suggestions */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
+              <span className="text-[11px] font-bold text-gray-400 shrink-0 uppercase tracking-wider">Ask Coach:</span>
+              {[
+                'Make summary 2 sentences',
+                'Add Python & SQL skills',
+                'Emphasize leadership in experience',
+                'How to explain job gap?'
+              ].map((suggestion) => (
+                <button
+                  key={suggestion}
+                  onClick={() => handleSendChatMessage(suggestion)}
+                  disabled={isGenerating}
+                  className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 rounded-lg shrink-0 transition text-xs font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  {suggestion}
+                </button>
+              ))}
             </div>
-            <button
-              onClick={() => handleSaveAndExit(finalResume)}
-              className="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-1.5 rounded-lg text-xs transition shadow-sm cursor-pointer"
-            >
-              Back to Profiles
-            </button>
+
+            {/* Chat Bar Input */}
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && chatInput.trim()) {
+                    handleSendChatMessage();
+                  }
+                }}
+                placeholder="Ask the coach anything or request specific resume changes..."
+                className="flex-1 px-4 py-2.5 text-sm bg-gray-50 border border-gray-300 rounded-xl outline-none focus:border-purple-600 focus:bg-white text-gray-900 font-medium placeholder:text-gray-400"
+              />
+              <button
+                onClick={() => handleSendChatMessage()}
+                disabled={!chatInput.trim() || isGenerating}
+                className="bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition duration-150 flex items-center gap-1.5 shadow-sm cursor-pointer shrink-0"
+              >
+                <span>Send</span>
+                <Send className="w-3.5 h-3.5" />
+              </button>
+
+              {coachStep === 'final' && finalResume && (
+                <button
+                  onClick={() => handleSaveAndExit(finalResume)}
+                  className="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition shadow-sm cursor-pointer shrink-0"
+                >
+                  Save & Exit
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
+
     </div>
   );
 }
